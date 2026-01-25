@@ -10,8 +10,11 @@ import {
   type TextProps,
   FlatList,
   type ListRenderItem,
+  Platform,
 } from 'react-native';
 import dayjs from 'dayjs';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
 import { supabase } from '../api/supabaseClient';
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
@@ -45,6 +48,12 @@ const COLORS = {
 
   NONE: '#6B7F96',
   NONE_BG: 'rgba(107,127,150,0.16)',
+
+  // ✅ confirm lock chip colors
+  LOCK_ON_BG: 'rgba(76,201,255,0.14)',
+  LOCK_ON_BD: 'rgba(76,201,255,0.45)',
+  LOCK_OFF_BG: '#0E141C',
+  LOCK_OFF_BD: '#1E2A38',
 };
 
 type Routine = {
@@ -94,11 +103,14 @@ const StatBox = memo(function StatBox({
   );
 });
 
+/** ✅ +a: 확인 잠금(대시보드) */
+const CONFIRM_LOCK_KEY = 'breath_confirm_lock_enabled_v1';
+
 export default function DashboardScreen() {
   const nav = useNavigation<NativeStackNavigationProp<DashboardStackParamList>>();
 
   const [userId, setUserId] = useState('');
-  const userIdRef = useRef<string>(''); // ✅ 재조회 방지
+  const userIdRef = useRef<string>('');
 
   const [routines, setRoutines] = useState<Routine[]>([]);
   const [todayLogs, setTodayLogs] = useState<DailyLogRow[]>([]);
@@ -110,7 +122,10 @@ export default function DashboardScreen() {
     color_mode: 'log',
   });
 
-  // ✅ 세션 합계만 (RPC 결과)
+  // ✅ 확인 잠금
+  const [confirmLock, setConfirmLock] = useState(false);
+  const confirmBootedRef = useRef(false);
+
   const [focusSeconds, setFocusSeconds] = useState(0);
   const [restSeconds, setRestSeconds] = useState(0);
 
@@ -120,6 +135,30 @@ export default function DashboardScreen() {
 
   const savingRef = useRef<Record<string, boolean>>({});
   const bulkRef = useRef(false);
+
+  const loadConfirmLock = useCallback(async () => {
+    try {
+      const v = await AsyncStorage.getItem(CONFIRM_LOCK_KEY);
+      setConfirmLock(v === '1');
+    } catch {
+      setConfirmLock(false);
+    }
+  }, []);
+
+  // ✅ 세그먼트 버튼용 setter (ON/OFF 확실)
+  const setConfirmLockMode = useCallback(
+    async (next: boolean) => {
+      if (next === confirmLock) return;
+      setConfirmLock(next);
+      try {
+        await AsyncStorage.setItem(CONFIRM_LOCK_KEY, next ? '1' : '0');
+      } catch {
+        // ignore
+      }
+      Alert.alert('확인 잠금', next ? 'ON (숫자/비율 숨김 · 새로고침 제한)' : 'OFF');
+    },
+    [confirmLock]
+  );
 
   const loadSettings = useCallback(async (uid: string) => {
     try {
@@ -171,24 +210,12 @@ export default function DashboardScreen() {
     [insightsSettings]
   );
 
-  /**
-   * ✅ 성능 개선
-   * - 유저 조회 1회 캐시
-   * - routines / logs / settings / sessionSum 병렬 실행
-   * - sessionSum은 RPC로 합계만 가져오기 (focus_sessions row 조회 제거)
-   *
-   * ⚠️ Supabase에 아래 RPC가 있어야 함:
-   * public.get_focus_rest_sum(p_user_id uuid, p_start timestamptz, p_end timestamptz)
-   * returns (focus_seconds bigint, rest_seconds bigint)
-   * 내부에서 duration_sec 사용
-   */
   const load = useCallback(
     async (opts?: { silent?: boolean }) => {
       const silent = !!opts?.silent;
       if (!silent) setLoading(true);
 
       try {
-        // ✅ user 캐시
         let uid = userIdRef.current;
         if (!uid) {
           const user = (await supabase.auth.getUser()).data.user;
@@ -209,7 +236,6 @@ export default function DashboardScreen() {
 
         const settingsPromise = loadSettings(uid);
 
-        // ✅ RPC: focus/rest 합계만
         const sumPromise = supabase.rpc('get_focus_rest_sum', {
           p_user_id: uid,
           p_start: startOfDayISO,
@@ -228,7 +254,6 @@ export default function DashboardScreen() {
           setFocusSeconds(0);
           setRestSeconds(0);
         } else {
-          // data는 보통 배열(1행)로 오지만, 환경에 따라 객체일 수도 있어 안전 처리
           const row = Array.isArray(sumRes.data) ? sumRes.data[0] : sumRes.data;
           setFocusSeconds(Number(row?.focus_seconds ?? 0));
           setRestSeconds(Number(row?.rest_seconds ?? 0));
@@ -243,10 +268,19 @@ export default function DashboardScreen() {
   );
 
   useEffect(() => {
+    (async () => {
+      if (confirmBootedRef.current) return;
+      confirmBootedRef.current = true;
+      await loadConfirmLock();
+    })();
+  }, [loadConfirmLock]);
+
+  useEffect(() => {
     load();
   }, [load]);
 
   const onRefresh = useCallback(async () => {
+    if (confirmLock) return;
     if (refreshing) return;
     setRefreshing(true);
     try {
@@ -254,7 +288,7 @@ export default function DashboardScreen() {
     } finally {
       setRefreshing(false);
     }
-  }, [load, refreshing]);
+  }, [confirmLock, load, refreshing]);
 
   const statusMap = useMemo(() => {
     const m = new Map<string, DailyStatus>();
@@ -264,14 +298,8 @@ export default function DashboardScreen() {
 
   const total = routines.length;
 
-  const doneCount = useMemo(
-    () => routines.filter((r) => statusMap.get(r.id) === 'done').length,
-    [routines, statusMap]
-  );
-  const restCount = useMemo(
-    () => routines.filter((r) => statusMap.get(r.id) === 'rest').length,
-    [routines, statusMap]
-  );
+  const doneCount = useMemo(() => routines.filter((r) => statusMap.get(r.id) === 'done').length, [routines, statusMap]);
+  const restCount = useMemo(() => routines.filter((r) => statusMap.get(r.id) === 'rest').length, [routines, statusMap]);
   const noneCount = Math.max(0, total - doneCount - restCount);
 
   const donePct = total === 0 ? 0 : Math.round((doneCount / total) * 100);
@@ -299,7 +327,6 @@ export default function DashboardScreen() {
 
       const prev = todayLogs;
 
-      // 낙관적 업데이트
       setTodayLogs((p) => {
         const next = p.filter((x) => x.routine_id !== routine.id);
         next.push({ user_id: uid, date_key: todayKey, routine_id: routine.id, status } as any);
@@ -351,11 +378,6 @@ export default function DashboardScreen() {
     [todayKey, todayLogs]
   );
 
-  /**
-   * ✅ 오늘은 쉬기
-   * - 전부 rest로 일괄 처리
-   * - 이미 전부 rest 상태면: "휴식 해제" => 오늘 로그 전부 삭제(미체크)
-   */
   const toggleRestAll = useCallback(async () => {
     const uid = userIdRef.current;
     if (!uid) return;
@@ -365,7 +387,6 @@ export default function DashboardScreen() {
     try {
       if (routines.length === 0) return;
 
-      // 1) 휴식 해제(= 전체 미체크로)
       if (allRest) {
         const prev = todayLogs;
         setTodayLogs([]);
@@ -390,7 +411,6 @@ export default function DashboardScreen() {
         return;
       }
 
-      // 2) 오늘은 쉬기(= 전부 rest로)
       const prev = todayLogs;
       setTodayLogs(() =>
         routines.map(
@@ -427,10 +447,71 @@ export default function DashboardScreen() {
     }
   }, [allRest, load, routines, todayKey, todayLogs]);
 
+  /** ✅ 균형 카드 우측상단: ON/OFF 세그먼트(직관) */
+  const ConfirmLockSegment = useMemo(() => {
+    return (
+      <View
+        style={{
+          flexDirection: 'row',
+          borderWidth: 1,
+          borderColor: confirmLock ? COLORS.LOCK_ON_BD : COLORS.LOCK_OFF_BD,
+          backgroundColor: COLORS.LOCK_OFF_BG,
+          borderRadius: 999,
+          overflow: 'hidden',
+        }}
+      >
+        <Pressable
+          onPress={() => setConfirmLockMode(false)}
+          hitSlop={8}
+          style={{
+            paddingVertical: 6,
+            paddingHorizontal: 10,
+            backgroundColor: confirmLock ? 'transparent' : 'rgba(255,255,255,0.08)',
+          }}
+        >
+          <T
+            style={{
+              color: confirmLock ? COLORS.MUTED : COLORS.TEXT,
+              fontWeight: '900',
+              fontSize: 11,
+            }}
+          >
+            OFF
+          </T>
+        </Pressable>
+
+        <Pressable
+          onPress={() => setConfirmLockMode(true)}
+          hitSlop={8}
+          style={{
+            paddingVertical: 6,
+            paddingHorizontal: 10,
+            backgroundColor: confirmLock ? COLORS.LOCK_ON_BG : 'transparent',
+            borderLeftWidth: 1,
+            borderLeftColor: 'rgba(30,42,56,0.9)',
+          }}
+        >
+          <T
+            style={{
+              color: confirmLock ? COLORS.DONE : COLORS.MUTED,
+              fontWeight: '900',
+              fontSize: 11,
+            }}
+          >
+            ON
+          </T>
+        </Pressable>
+      </View>
+    );
+  }, [confirmLock, setConfirmLockMode]);
+
   /**
    * ✅ Header
-   * - “오늘은 쉽니다” 버튼을 ‘오늘 기록’ 섹션 최상단으로 이동
+   * - 확인잠금: 균형 카드 우측 상단에 세그먼트 형태로 표시
+   * - 버튼명은 아래에서 쉽게 바꿀 수 있도록 변수화
    */
+  const addLabel = '호흡 추가'; // ✅ 여기만 바꾸면 됨
+
   const Header = useMemo(() => {
     return (
       <View style={{ padding: 14, paddingBottom: 12 }}>
@@ -469,51 +550,78 @@ export default function DashboardScreen() {
             padding: 14,
           }}
         >
-          <T style={{ color: COLORS.TEXT, fontWeight: '900' }}>균형</T>
-          <T style={{ color: COLORS.MUTED, marginTop: 6, fontSize: 12 }}>
-            전체 기록({total}개) 대비 비율입니다. 미체크는 “아직 결정하지 않음”을 의미합니다.
-          </T>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+            <T style={{ color: COLORS.TEXT, fontWeight: '900' }}>균형</T>
 
-          <View
-            style={{
-              marginTop: 12,
-              height: 18,
-              borderRadius: 999,
-              overflow: 'hidden',
-              borderWidth: 1,
-              borderColor: COLORS.LINE,
-              backgroundColor: '#0E141C',
-              flexDirection: 'row',
-            }}
-          >
-            <View
-              style={{
-                flex: doneFlex,
-                backgroundColor: COLORS.DONE_BG,
-                borderRightWidth: doneFlex > 0 && noneFlex + restFlex > 0 ? 1 : 0,
-                borderRightColor: 'rgba(30,42,56,0.8)',
-              }}
-            />
-            <View
-              style={{
-                flex: noneFlex,
-                backgroundColor: COLORS.NONE_BG,
-                borderRightWidth: noneFlex > 0 && restFlex > 0 ? 1 : 0,
-                borderRightColor: 'rgba(30,42,56,0.8)',
-              }}
-            />
-            <View style={{ flex: restFlex, backgroundColor: COLORS.REST_BG }} />
+            {/* ✅ 우측 상단: ON/OFF 세그먼트 */}
+            {ConfirmLockSegment}
           </View>
 
-          <View style={{ flexDirection: 'row', gap: 10, marginTop: 12 }}>
-            <StatBox label="완료" percent={donePct} count={doneCount} color={COLORS.DONE} />
-            <StatBox label="미체크" percent={nonePct} count={noneCount} color={COLORS.NONE} />
-            <StatBox label="휴식" percent={restPct} count={restCount} color={COLORS.REST} />
-          </View>
+          {confirmLock ? (
+            <View
+              style={{
+                marginTop: 10,
+                padding: 12,
+                borderRadius: 14,
+                backgroundColor: '#0E141C',
+                borderWidth: 1,
+                borderColor: COLORS.LINE,
+              }}
+            >
+              <T style={{ color: COLORS.MUTED, fontSize: 12, lineHeight: 18 }}>
+                지금은 <T style={{ color: COLORS.TEXT, fontWeight: '900' }}>숫자 확인을 멈추는 모드</T>입니다.
+                {'\n'}
+                오늘은 “완료/휴식”만 누르면 충분합니다.
+              </T>
+            </View>
+          ) : (
+            <>
+              <T style={{ color: COLORS.MUTED, marginTop: 6, fontSize: 12 }}>
+                전체 기록({total}개) 대비 비율입니다. 미체크는 “아직 결정하지 않음”을 의미합니다.
+              </T>
 
-          <T style={{ color: COLORS.MUTED, marginTop: 10, fontSize: 12 }}>
-            참고: 타이머 기준 완료 {focusMin}분 · 휴식 {restMin}분입니다.
-          </T>
+              <View
+                style={{
+                  marginTop: 12,
+                  height: 18,
+                  borderRadius: 999,
+                  overflow: 'hidden',
+                  borderWidth: 1,
+                  borderColor: COLORS.LINE,
+                  backgroundColor: '#0E141C',
+                  flexDirection: 'row',
+                }}
+              >
+                <View
+                  style={{
+                    flex: doneFlex,
+                    backgroundColor: COLORS.DONE_BG,
+                    borderRightWidth: doneFlex > 0 && noneFlex + restFlex > 0 ? 1 : 0,
+                    borderRightColor: 'rgba(30,42,56,0.8)',
+                  }}
+                />
+                <View
+                  style={{
+                    flex: noneFlex,
+                    backgroundColor: COLORS.NONE_BG,
+                    borderRightWidth: noneFlex > 0 && restFlex > 0 ? 1 : 0,
+                    borderRightColor: 'rgba(30,42,56,0.8)',
+                  }}
+                />
+                <View style={{ flex: restFlex, backgroundColor: COLORS.REST_BG }} />
+              </View>
+
+              <View style={{ flexDirection: 'row', gap: 10, marginTop: 12 }}>
+                <StatBox label="완료" percent={donePct} count={doneCount} color={COLORS.DONE} />
+                <StatBox label="미체크" percent={nonePct} count={noneCount} color={COLORS.NONE} />
+                <StatBox label="휴식" percent={restPct} count={restCount} color={COLORS.REST} />
+              </View>
+
+              <T style={{ color: COLORS.MUTED, marginTop: 10, fontSize: 12 }}>
+                참고: 타이머 기준 완료 {focusMin}분 · 휴식 {restMin}분입니다.
+              </T>
+            </>
+          )}
         </View>
 
         {/* ROUTINES HEADER */}
@@ -538,11 +646,11 @@ export default function DashboardScreen() {
               borderColor: 'rgba(76,201,255,0.32)',
             }}
           >
-            <T style={{ color: COLORS.DONE, fontWeight: '900', fontSize: 12 }}>+ 기록</T>
+            <T style={{ color: COLORS.DONE, fontWeight: '900', fontSize: 12 }}>{addLabel}</T>
           </Pressable>
         </View>
 
-        {/* ✅ 여기! 오늘 기록 카드 최상단 */}
+        {/* 오늘은 쉬기 */}
         <Pressable
           onPress={toggleRestAll}
           disabled={loading || routines.length === 0}
@@ -579,7 +687,10 @@ export default function DashboardScreen() {
       </View>
     );
   }, [
+    ConfirmLockSegment,
+    addLabel,
     allRest,
+    confirmLock,
     doneCount,
     doneFlex,
     donePct,
@@ -634,9 +745,7 @@ export default function DashboardScreen() {
                 opacity: saving ? 0.6 : 1,
               }}
             >
-              <T style={{ color: st === 'done' ? COLORS.DONE : COLORS.MUTED, fontWeight: '900' }}>
-                완료
-              </T>
+              <T style={{ color: st === 'done' ? COLORS.DONE : COLORS.MUTED, fontWeight: '900' }}>완료</T>
             </Pressable>
 
             <Pressable
@@ -671,9 +780,7 @@ export default function DashboardScreen() {
                 opacity: saving ? 0.6 : 1,
               }}
             >
-              <T style={{ color: st === 'rest' ? COLORS.REST : COLORS.MUTED, fontWeight: '900' }}>
-                휴식
-              </T>
+              <T style={{ color: st === 'rest' ? COLORS.REST : COLORS.MUTED, fontWeight: '900' }}>휴식</T>
             </Pressable>
           </View>
         </View>
@@ -691,20 +798,21 @@ export default function DashboardScreen() {
         ListHeaderComponent={Header}
         contentContainerStyle={{ paddingBottom: 24 }}
         refreshControl={
-          <RefreshControl
-            refreshing={refreshing}
-            onRefresh={onRefresh}
-            tintColor={COLORS.DONE}
-            colors={[COLORS.DONE]}
-            progressBackgroundColor="#0E141C"
-          />
+          confirmLock ? undefined : (
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              tintColor={COLORS.DONE}
+              colors={[COLORS.DONE]}
+              progressBackgroundColor="#0E141C"
+            />
+          )
         }
-        // ✅ 가상화/성능 옵션
         initialNumToRender={8}
         windowSize={7}
         maxToRenderPerBatch={10}
         updateCellsBatchingPeriod={30}
-        removeClippedSubviews
+        removeClippedSubviews={Platform.OS === 'android'}
       />
     </ScreenContainer>
   );

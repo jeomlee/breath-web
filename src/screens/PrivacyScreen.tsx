@@ -65,13 +65,13 @@ export default function PrivacyScreen() {
           <T style={{ color: MUTED, marginTop: 8, lineHeight: 20 }}>
             • 계정 정보: 이메일(로그인/인증 목적){'\n'}
             • 프로필 정보: 닉네임(함께하기 화면 표기 목적){'\n'}
-            • 서비스 이용 기록: 루틴/체크 기록(완료/휴식 등), 날짜별 기록(동기화 및 통계 제공 목적)
+            • 서비스 이용 기록: 호흡/체크 기록(완료/휴식 등), 날짜별 기록(동기화 및 통계 제공 목적)
           </T>
 
           <T style={{ color: TEXT, fontSize: 14, fontWeight: '900', marginTop: 16 }}>2. 이용 목적</T>
           <T style={{ color: MUTED, marginTop: 8, lineHeight: 20 }}>
             • 회원 식별 및 로그인/인증{'\n'}
-            • 루틴/기록 저장 및 기기 간 동기화{'\n'}
+            • 호흡/기록 저장 및 기기 간 동기화{'\n'}
             • 서비스 품질 개선 및 오류 대응{'\n'}
             • 이용자 문의 대응
           </T>

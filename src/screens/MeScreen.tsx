@@ -314,9 +314,9 @@ export default function MeScreen() {
           </View>
         </Card>
 
-        <Card title="정책/계정" desc="심사/운영을 위한 항목입니다.">
+        <Card title="정책/계정">
           <View style={{ gap: 10 }}>
-            <RowButton label="개인정보처리방침" sub="앱 내에서 확인합니다." onPress={goPrivacy} />
+            <RowButton label="개인정보처리방침" onPress={goPrivacy} />
             <RowButton
               label="계정 삭제"
               sub="요청 → 확인 → 삭제 처리 (복구 불가)"

@@ -100,8 +100,8 @@ const topPad = useMemo(
 
     try {
       const room = await findRoomByCode(code);
-      if (!room) return Alert.alert('안내', '해당 코드의 공유 루틴을 찾지 못했습니다.');
-      if (room.is_active === false) return Alert.alert('안내', '현재 비활성화된 공유 루틴입니다.');
+      if (!room) return Alert.alert('안내', '해당 코드의 공유 호흡을 찾지 못했습니다.');
+      if (room.is_active === false) return Alert.alert('안내', '현재 비활성화된 공유 호흡입니다.');
 
       await joinRoom(room.id);
       setJoinCode('');
@@ -133,13 +133,13 @@ const topPad = useMemo(
         <View>
           <T style={{ color: TEXT, fontSize: 26, fontWeight: '900' }}>함께하기</T>
           <T style={{ color: MUTED, marginTop: 6, lineHeight: 20 }}>
-            참여 중인 공유 루틴이 여기에 표시됩니다.
+            참여 중인 공유 호흡이 여기에 표시됩니다.
           </T>
         </View>
 
         {/* 빠른 시작 */}
-        <Card title="빠른 시작" desc="내 루틴을 공유하거나, 코드로 바로 참여할 수 있어요.">
-          {/* 내 루틴 공유 */}
+        <Card title="빠른 시작" desc="내 호흡을 공유하거나, 코드로 바로 참여할 수 있어요.">
+          {/* 내 호흡 공유 */}
           <Pressable
             onPress={goShareCreate}
             style={{
@@ -152,7 +152,7 @@ const topPad = useMemo(
               justifyContent: 'center',
             }}
           >
-            <T style={{ color: BLUE, fontWeight: '900' }}>내 루틴 공유하기</T>
+            <T style={{ color: BLUE, fontWeight: '900' }}>내 호흡 공유하기</T>
           </Pressable>
 
           {/* 참여 코드 */}
@@ -209,10 +209,10 @@ const topPad = useMemo(
           </T>
         </Card>
 
-        {/* 참여 중인 루틴 */}
-        <Card title="참여 중인 공유 루틴" desc="카드를 눌러 보드로 이동하실 수 있습니다.">
+        {/* 참여 중인 호흡 */}
+        <Card title="참여 중인 공유 호흡" desc="카드를 눌러 보드로 이동하실 수 있습니다.">
           {rooms.length === 0 ? (
-            <T style={{ color: MUTED }}>아직 참여 중인 공유 루틴이 없습니다.</T>
+            <T style={{ color: MUTED }}>아직 참여 중인 공유 호흡이 없습니다.</T>
           ) : (
             <View style={{ gap: 10 }}>
               {rooms.map((r) => (
@@ -228,7 +228,7 @@ const topPad = useMemo(
                   }}
                 >
                   <T style={{ color: TEXT, fontWeight: '900', fontSize: 15 }}>
-                    {r.routine_title ?? '루틴'}
+                    {r.routine_title ?? '호흡'}
                   </T>
                   <T style={{ color: MUTED, marginTop: 6, fontSize: 12, fontWeight: '900' }}>
                     참여 코드: {r.join_code} · 상태: {r.is_active ? '활성' : '비활성'}

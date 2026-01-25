@@ -21,7 +21,10 @@
     ],
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.jeomlee.breath"
+      "bundleIdentifier": "com.jeomlee.breath",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "adaptiveIcon": {

@@ -172,11 +172,20 @@ export default function AuthScreen() {
     });
   };
 
-  const signInWithApple = async () => {
-    Keyboard.dismiss();
-    await withLoading(async () => {
-      if (Platform.OS !== 'ios') return;
+const signInWithApple = async () => {
+  Keyboard.dismiss();
 
+  await withLoading(async () => {
+    if (Platform.OS !== 'ios') return;
+
+    // ✅ 1) 기기 지원 여부 먼저 체크
+    const available = await AppleAuthentication.isAvailableAsync();
+    if (!available) {
+      Alert.alert('로그인 실패', '이 기기에서는 Apple 로그인을 사용할 수 없습니다.');
+      return;
+    }
+
+    try {
       const cred = await AppleAuthentication.signInAsync({
         requestedScopes: [
           AppleAuthentication.AppleAuthenticationScope.FULL_NAME,
@@ -184,8 +193,10 @@ export default function AuthScreen() {
         ],
       });
 
-      if (!cred.identityToken) {
-        return Alert.alert('애플 로그인 실패', 'identityToken을 가져오지 못했습니다.');
+      // 사용자가 취소한 경우도 여기로 들어올 수 있음
+      if (!cred?.identityToken) {
+        Alert.alert('로그인 실패', 'Apple identityToken을 가져오지 못했습니다.');
+        return;
       }
 
       const { error } = await supabase.auth.signInWithIdToken({
@@ -193,9 +204,19 @@ export default function AuthScreen() {
         token: cred.identityToken,
       });
 
-      if (error) return Alert.alert('로그인 실패', error.message);
-    });
-  };
+      if (error) {
+        Alert.alert('로그인 실패', error.message);
+        return;
+      }
+    } catch (e: any) {
+      // ✅ 2) 여기서 무조건 원인 노출
+      const msg = e?.message ?? String(e);
+      console.log('[AppleLoginError]', e);
+      Alert.alert('로그인 실패', msg);
+    }
+  });
+};
+
 
   const signInWithEmail = async () => {
     Keyboard.dismiss();
