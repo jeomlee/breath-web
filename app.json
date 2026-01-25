@@ -1,0 +1,39 @@
+{
+  "expo": {
+    "name": "BREATH",
+    "slug": "breath",
+    "scheme": "breath",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "icon": "./assets/icon.png",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0B0F14"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "plugins": [
+      "expo-apple-authentication",
+      "expo-web-browser"
+    ],
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.jeomlee.breath"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0B0F14"
+      },
+      "package": "com.jeomlee.breath"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "223661a7-5f8f-4d58-8817-07ecb441f7b6"
+      }
+    }
+  }
+}
