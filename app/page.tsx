@@ -35,7 +35,7 @@ export default function HomePage() {
             <div className="card heroMain">
               <div className="kicker">
                 <span className="dot" />
-                오늘은 1개면 충분해.
+                오늘은 1개면 충분해요.
               </div>
 
               <div className="h1">
@@ -45,7 +45,7 @@ export default function HomePage() {
               </div>
 
               <p className="desc">
-                BREATH는 “해야 한다”를 줄이고, “계속할 수 있게” 만드는 기록 앱이야.
+                BREATH는 “해야 한다”를 줄이고, “계속할 수 있게” 만드는 기록 앱.
                 <br />
                 완벽하지 않아도, 끊겨도, 다시 시작할 수 있게.
               </p>
@@ -85,11 +85,11 @@ export default function HomePage() {
                 </div>
                 <div className="featureItem">
                   <div className="ft"><span className="badge" /> 알림(선택)</div>
-                  <p>강요하지 않는 한 번의 알림. 켜고 끄는 건 전적으로 너의 선택.</p>
+                  <p>강요하지 않는 한 번의 알림. 켜고 끄는 건 전적으로 선택.</p>
                 </div>
                 <div className="featureItem">
                   <div className="ft"><span className="badge" /> 최소 수집</div>
-                  <p>서비스 제공에 필요한 범위에서만 처리해. 불필요한 정보는 받지 않아.</p>
+                  <p>서비스 제공에 필요한 범위에서만 처리합니다. 불필요한 정보는 받지 않습니다.</p>
                 </div>
               </div>
             </aside>
