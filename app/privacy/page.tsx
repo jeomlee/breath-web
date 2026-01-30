@@ -1,6 +1,6 @@
 // app/privacy/page.tsx
 export default function PrivacyPage() {
-  const supportEmail = 'breath.app@gmail.com';
+  const supportEmail = 'zxcvbnm89432@gmail.com';
 
   return (
     <main className="container docWrap">

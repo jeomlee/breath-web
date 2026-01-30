@@ -1,6 +1,6 @@
 // app/page.tsx
 export default function HomePage() {
-  const supportEmail = 'breath.app@gmail.com';
+  const supportEmail = 'zxcvbnm89432@gmail.com';
   // 배포 후 App Store 링크 생기면 여기에 교체하면 됨.
   const downloadHref = '#'; // 예: 'https://apps.apple.com/app/idXXXXXXXXX'
   const testflightHref = '#'; // 예: TestFlight 초대 링크

@@ -1,6 +1,6 @@
 // app/terms/page.tsx
 export default function TermsPage() {
-  const supportEmail = 'breath.app@gmail.com';
+  const supportEmail = 'zxcvbnm89432@gmail.com';
 
   return (
     <main className="container docWrap">
