@@ -15,19 +15,36 @@
 }
 
 * { box-sizing: border-box; }
-html, body { height: 100%; }
+
+html, body {
+  height: 100%;
+  background: var(--bg) !important;
+}
 
 body {
   margin: 0;
-  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Apple SD Gothic Neo, Noto Sans KR, Helvetica,
-    Arial;
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Apple SD Gothic Neo, Noto Sans KR, Helvetica, Arial;
   color: var(--text);
 
-  /* ✅ 하단 그라데이션 제거: linear-gradient 삭제 */
+  /* ✅ 하단 그라데이션 완전 차단 */
+  background: var(--bg) !important;
+  background-image: none !important;
+
+  position: relative;
+  isolation: isolate;
+}
+
+/* ✅ 상단 느낌만 주고, 하단은 절대 그라데이션 안 생기게 (fixed + z-index -1) */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: -1;
+
   background:
     radial-gradient(1200px 700px at 20% 10%, rgba(76, 201, 255, 0.16), transparent 55%),
-    radial-gradient(900px 600px at 80% 0%, rgba(164, 109, 255, 0.14), transparent 60%),
-    #0b1020;
+    radial-gradient(900px 600px at 80% 0%, rgba(164, 109, 255, 0.14), transparent 60%);
 }
 
 a { color: inherit; text-decoration: none; }
@@ -217,9 +234,7 @@ a:hover { opacity: 0.92; }
   margin-top: 8px;
 }
 
-.heroSide {
-  padding: 18px;
-}
+.heroSide { padding: 18px; }
 
 .sideTitle {
   font-weight: 800;
@@ -227,10 +242,7 @@ a:hover { opacity: 0.92; }
   color: rgba(255,255,255,0.88);
 }
 
-.featureList {
-  display: grid;
-  gap: 10px;
-}
+.featureList { display: grid; gap: 10px; }
 
 .featureItem {
   padding: 14px 14px;
@@ -261,9 +273,7 @@ a:hover { opacity: 0.92; }
   font-size: 13px;
 }
 
-.section {
-  padding: 12px 0 42px;
-}
+.section { padding: 12px 0 42px; }
 
 .grid2 {
   display: grid;
@@ -274,9 +284,7 @@ a:hover { opacity: 0.92; }
   .grid2 { grid-template-columns: 1fr; }
 }
 
-.panel {
-  padding: 18px;
-}
+.panel { padding: 18px; }
 
 .panelTitle {
   font-weight: 900;
@@ -289,11 +297,7 @@ a:hover { opacity: 0.92; }
   line-height: 1.7;
 }
 
-.faq {
-  display: grid;
-  gap: 10px;
-  margin-top: 10px;
-}
+.faq { display: grid; gap: 10px; margin-top: 10px; }
 
 .faqItem {
   border-radius: 18px;
@@ -302,11 +306,7 @@ a:hover { opacity: 0.92; }
   overflow: hidden;
 }
 
-.faqQ {
-  padding: 14px 14px;
-  font-weight: 800;
-  cursor: default;
-}
+.faqQ { padding: 14px 14px; font-weight: 800; cursor: default; }
 
 .faqA {
   padding: 0 14px 14px;
@@ -316,7 +316,7 @@ a:hover { opacity: 0.92; }
 }
 
 .footer {
-  padding: 22px 0 22px; /* ✅ 아래 여백 줄여서 하단 어두운 영역 줄임 */
+  padding: 22px 0 22px;
   border-top: 1px solid rgba(255,255,255,0.08);
   color: rgba(255,255,255,0.62);
   font-size: 12px;
@@ -334,13 +334,9 @@ a:hover { opacity: 0.92; }
   opacity: 0.9;
 }
 
-.docWrap {
-  padding: 34px 0 52px;
-}
+.docWrap { padding: 34px 0 52px; }
 
-.docCard {
-  padding: 22px;
-}
+.docCard { padding: 22px; }
 
 .docCard h1 {
   margin: 0 0 12px;
@@ -361,7 +357,6 @@ a:hover { opacity: 0.92; }
 
 .docCard ul { margin: 8px 0 0 18px; }
 
-/* 남겨도 되지만 page에서 hr 삭제했으니 사실상 안 씀 */
 .hr {
   height: 1px;
   background: rgba(255,255,255,0.10);
