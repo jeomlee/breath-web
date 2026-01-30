@@ -1,4 +1,6 @@
 // app/page.tsx
+import Image from "next/image";
+
 export default function HomePage() {
   const supportEmail = 'zxcvbnm89432@gmail.com';
   const downloadHref = '#';
@@ -9,7 +11,14 @@ export default function HomePage() {
       <header className="nav">
         <div className="container navInner">
           <div className="brand">
-            <div className="logo" aria-hidden />
+          <Image
+            src="/logo.png"
+            alt="BREATH logo"
+            width={38}
+            height={38}
+            priority
+            style={{ borderRadius: 12 }}
+          />
             <div className="brandText">
               <div className="title">BREATH</div>
               <div className="sub">강박 없이, 계속을 위한 기록</div>
