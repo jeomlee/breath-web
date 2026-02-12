@@ -11,7 +11,7 @@ import type {
   InsightsStackParamList,
   ConnectStackParamList,
   RootTabParamList,
-  MeStackParamList, // ✅ 추가
+  MeStackParamList,
 } from './navigation/types';
 
 import { InsightsHubProvider, type InsightsHubApi } from './navigation/insightsHub';
@@ -26,13 +26,13 @@ import RoutineDetailScreen from './screens/RoutineDetailScreen';
 import CalendarScreen from './screens/CalendarScreen';
 
 import MeScreen from './screens/MeScreen';
-import PrivacyScreen from './screens/PrivacyScreen'; // ✅ 추가
+import PrivacyScreen from './screens/PrivacyScreen';
+import DeleteAccountScreen from './screens/DeleteAccountScreen';
 
 // Connect
 import ConnectSharedScreen from './screens/ConnectSharedScreen';
 import ShareRoutineCreateScreen from './screens/ShareRoutineCreateScreen';
 import SharedRoutineBoardScreen from './screens/SharedRoutineBoardScreen';
-import RoutinePacksScreen from './screens/RoutinePacksScreen';
 
 /* -----------------------
    Navigators
@@ -42,7 +42,7 @@ const Tab = createBottomTabNavigator<RootTabParamList>();
 const DashStack = createNativeStackNavigator<DashboardStackParamList>();
 const InsStack = createNativeStackNavigator<InsightsStackParamList>();
 const ConnectStackNav = createNativeStackNavigator<ConnectStackParamList>();
-const MeStackNav = createNativeStackNavigator<MeStackParamList>(); // ✅ 추가
+const MeStackNav = createNativeStackNavigator<MeStackParamList>();
 
 const BG = '#0B0F14';
 const LINE = '#1E2A38';
@@ -101,17 +101,16 @@ function ConnectStack() {
       <ConnectStackNav.Screen name="ConnectHome" component={ConnectHub} />
       <ConnectStackNav.Screen name="ShareRoutineCreate" component={ShareRoutineCreateScreen} />
       <ConnectStackNav.Screen name="SharedRoutineBoard" component={SharedRoutineBoardScreen} />
-      <ConnectStackNav.Screen name="RoutinePacks" component={RoutinePacksScreen as any} />
     </ConnectStackNav.Navigator>
   );
 }
 
-// ✅ Me 탭도 스택으로 (Privacy 내부 페이지 라우팅 가능)
 function MeStack() {
   return (
     <MeStackNav.Navigator screenOptions={{ headerShown: false, contentStyle: { backgroundColor: BG } }}>
       <MeStackNav.Screen name="MeHome" component={MeScreen} />
       <MeStackNav.Screen name="Privacy" component={PrivacyScreen} />
+      <MeStackNav.Screen name="DeleteAccount" component={DeleteAccountScreen as any} />
     </MeStackNav.Navigator>
   );
 }
@@ -155,7 +154,6 @@ export default function AppNavigator() {
         },
         tabBarActiveTintColor: BLUE,
         tabBarInactiveTintColor: MUTED,
-
         tabBarLabel: ({ color }) => (
           <Text
             allowFontScaling={false}
@@ -169,7 +167,6 @@ export default function AppNavigator() {
             {route.name}
           </Text>
         ),
-
         tabBarIcon: ({ color, focused }) => {
           const key = route.name;
           if (key === 'Dashboard') return tabIcon(focused ? 'home' : 'home-outline', color);

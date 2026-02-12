@@ -12,7 +12,6 @@ import { Calendar } from 'react-native-calendars';
 import dayjs from 'dayjs';
 import { supabase } from '../api/supabaseClient';
 import { useRoute, useNavigation } from '@react-navigation/native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { GroupKey } from '../navigation/types';
 import ScreenContainer from '../components/ScreenContainer';
 
@@ -32,6 +31,12 @@ type DailyLogRow = {
   status: 'done' | 'rest';
 };
 
+type MoodValue = 1 | 2 | 3 | 4 | 5;
+type MoodRow = {
+  date_key: string;
+  mood: MoodValue;
+};
+
 const BG = '#0B0F14';
 const CARD = '#121A23';
 const LINE = '#1E2A38';
@@ -41,6 +46,14 @@ const TEXT = '#EAF2FF';
 const FOCUS = '#4CC9FF';
 const REST = '#3BE7B0';
 const NONE = '#1A2330';
+
+const MOODS: Array<{ v: MoodValue; emoji: string; label: string; sub: string; tx: string }> = [
+  { v: 1, emoji: '😞', label: '너무 힘듦', sub: '버티는 중', tx: '#FF7AA2' },
+  { v: 2, emoji: '😕', label: '힘듦', sub: '좀 무거움', tx: '#FFB37A' },
+  { v: 3, emoji: '😐', label: '그저 그럼', sub: '무난함', tx: '#FFD88A' },
+  { v: 4, emoji: '🙂', label: '괜찮음', sub: '숨이 트임', tx: '#76E7D6' },
+  { v: 5, emoji: '😊', label: '좋음', sub: '가벼움', tx: FOCUS },
+];
 
 function hexToRgb(hex: string) {
   const c = hex.replace('#', '');
@@ -72,7 +85,6 @@ export default function CalendarScreen(
 ) {
   const route = useRoute<any>();
   const nav = useNavigation<any>();
-  const insets = useSafeAreaInsets();
 
   const presetFromRoute = route?.params?.presetFilter as GroupKey | undefined;
   const presetFilter = presetFromProp ?? presetFromRoute;
@@ -81,12 +93,18 @@ export default function CalendarScreen(
   const [currentMonth, setCurrentMonth] = useState(dayjs().format('YYYY-MM'));
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
 
-  // ✅ 토글 의미 변경: "미체크 숨기기"
+  // ✅ 토글 의미: "미체크 숨기기"
   const [hideNone, setHideNone] = useState(false);
+
+  // ✅ 기분보기 토글: ON이면 캘린더 각 날짜에 이모지 표시
+  const [showMoodOnCalendar, setShowMoodOnCalendar] = useState(false);
 
   const [routineMap, setRoutineMap] = useState<Record<string, { title: string; is_active: boolean }>>({});
   const [logs, setLogs] = useState<DailyLogRow[]>([]);
   const [loading, setLoading] = useState(false);
+
+  // ✅ month moods: date_key -> mood
+  const [moodMap, setMoodMap] = useState<Record<string, MoodValue>>({});
 
   const [tip, setTip] = useState('');
   const tipTimer = useRef<any>(null);
@@ -130,20 +148,41 @@ export default function CalendarScreen(
     if (!user) return;
 
     setLoading(true);
-    const { data, error } = await supabase
+
+    const logsPromise = supabase
       .from('daily_logs')
       .select('date_key,routine_id,status')
       .eq('user_id', user.id)
       .gte('date_key', monthRange.start)
       .lte('date_key', monthRange.end);
 
+    const moodsPromise = supabase
+      .from('mood_logs')
+      .select('date_key,mood')
+      .eq('user_id', user.id)
+      .gte('date_key', monthRange.start)
+      .lte('date_key', monthRange.end);
+
+    const [logsRes, moodsRes] = await Promise.all([logsPromise, moodsPromise]);
+
     setLoading(false);
 
-    if (error) {
-      Alert.alert('기록 불러오기 실패', error.message);
+    if (logsRes.error) {
+      Alert.alert('기록 불러오기 실패', logsRes.error.message);
       return;
     }
-    setLogs((data as any) || []);
+    if (moodsRes.error) {
+      Alert.alert('기분 불러오기 실패', moodsRes.error.message);
+      // 기분만 실패해도 루틴 기록은 보여주기
+    }
+
+    setLogs((logsRes.data as any) || []);
+
+    const nextMoodMap: Record<string, MoodValue> = {};
+    ((moodsRes.data as any) as MoodRow[] | null)?.forEach((row) => {
+      if (row?.date_key && row?.mood) nextMoodMap[row.date_key] = row.mood;
+    });
+    setMoodMap(nextMoodMap);
   }, [monthRange.end, monthRange.start]);
 
   useEffect(() => {
@@ -160,10 +199,6 @@ export default function CalendarScreen(
     };
   }, []);
 
-  /**
-   * ✅ 달력용 상태 집계: 휴식 / 미체크 / 완료
-   * - 이제 "활성/비활성 필터"는 제거
-   */
   const dayStatus = useMemo(() => {
     const byDay: Record<string, { done: number; rest: boolean }> = {};
 
@@ -248,8 +283,6 @@ export default function CalendarScreen(
       }
 
       if (row.routine_id) {
-        if (row.status !== 'done' && row.status !== 'rest') continue;
-
         const meta = routineMap[row.routine_id];
         items.push({
           id: row.routine_id,
@@ -286,6 +319,13 @@ export default function CalendarScreen(
     return `${pretty} · 미체크`;
   }, [selectedDate, dayStatus]);
 
+  const selectedMood = useMemo(() => {
+    if (!selectedDate) return null;
+    const v = moodMap[selectedDate];
+    if (!v) return null;
+    return MOODS.find((m) => m.v === v) ?? null;
+  }, [moodMap, selectedDate]);
+
   const goBackToInsights = useCallback(() => {
     if (nav.canGoBack?.()) {
       nav.goBack();
@@ -294,21 +334,27 @@ export default function CalendarScreen(
     nav.navigate('Insights');
   }, [nav]);
 
-  // ✅ 위 여백: 가능한 타이트하게
-  const topPad = useMemo(() => Math.max(insets.top - 14, 0), [insets.top]);
-
   return (
     <ScreenContainer bg={BG} barStyle="light-content">
       <ScrollView
+        style={{ flex: 1 }}
         contentContainerStyle={{
-          paddingTop: topPad,
+          flexGrow: 1,
+          paddingTop: 6,
           paddingHorizontal: 12,
           paddingBottom: 18,
         }}
         showsVerticalScrollIndicator={false}
       >
         {/* 헤더 */}
-        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            marginBottom: 12,
+          }}
+        >
           <Pressable
             onPress={goBackToInsights}
             hitSlop={10}
@@ -316,7 +362,7 @@ export default function CalendarScreen(
               flexDirection: 'row',
               alignItems: 'center',
               gap: 8,
-              paddingVertical: 2,
+              paddingVertical: 6,
               paddingHorizontal: 10,
               borderRadius: 999,
               backgroundColor: '#0F151D',
@@ -330,7 +376,6 @@ export default function CalendarScreen(
 
           <View style={{ alignItems: 'flex-end' }}>
             <T style={{ color: TEXT, fontSize: 22, fontWeight: '900' }}>캘린더</T>
-
           </View>
         </View>
 
@@ -342,7 +387,6 @@ export default function CalendarScreen(
             borderWidth: 1,
             borderColor: LINE,
             padding: 10,
-            marginTop: 6,
           }}
         >
           <Calendar
@@ -375,15 +419,19 @@ export default function CalendarScreen(
               const isSelected = !!d && selectedDate === d;
 
               const isNone = st === 'none';
-              const disableNone = hideNone && isNone; // ✅ 미체크 숨기기 ON이면 미체크 날짜 클릭 막기
+              const disableNone = hideNone && isNone;
 
-              const txtColor = isToday
-                ? FOCUS
-                : isNone && hideNone
-                  ? 'rgba(143,163,184,0.28)' // ✅ 미체크 숨김(흐리게)
+              const txtColor =
+                isToday
+                  ? FOCUS
+                  : isNone && hideNone
+                  ? 'rgba(143,163,184,0.28)'
                   : bg === 'transparent'
-                    ? MUTED
-                    : TEXT;
+                  ? MUTED
+                  : TEXT;
+
+              const moodV = d ? moodMap[d] : undefined;
+              const moodMeta = moodV ? MOODS.find((m) => m.v === moodV) : null;
 
               return (
                 <Pressable
@@ -391,9 +439,10 @@ export default function CalendarScreen(
                   disabled={isDisabled || disableNone}
                   style={{
                     width: 40,
-                    height: 42,
+                    height: 46,
                     alignItems: 'center',
-                    justifyContent: 'center',
+                    justifyContent: 'flex-start',
+                    paddingTop: 2,
                     opacity: isDisabled ? 0.35 : disableNone ? 0.5 : 1,
                   }}
                 >
@@ -418,100 +467,115 @@ export default function CalendarScreen(
                   {st === 'done' && (
                     <View style={{ width: 14, height: 3, borderRadius: 999, backgroundColor: FOCUS, marginTop: 4, opacity: 0.85 }} />
                   )}
+
+                  {showMoodOnCalendar && moodMeta ? (
+                    <T style={{ marginTop: 3, fontSize: 12, fontWeight: '900', color: moodMeta.tx }}>
+                      {moodMeta.emoji}
+                    </T>
+                  ) : null}
                 </Pressable>
               );
             }}
           />
         </View>
 
-        {/* 캘린더 아래: 레전드 + "미체크 숨기기" 토글(기존 스위치 UI 유지) */}
+        {/* ✅ 토글 2개: 오른쪽 정렬 */}
         <View
           style={{
-            marginTop: 10,
+            marginTop: 12,
             flexDirection: 'row',
             alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: 10,
+            justifyContent: 'flex-end',
           }}
         >
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flexShrink: 1 }}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-              <View
-                style={{
-                  width: 10,
-                  height: 10,
-                  borderRadius: 3,
-                  backgroundColor: rgba(REST, 0.9),
-                  borderWidth: 1,
-                  borderColor: LINE,
-                }}
-              />
-              <T style={{ color: MUTED, fontSize: 12, fontWeight: '900' }}>휴식</T>
-            </View>
-
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-              <View style={{ width: 10, height: 10, borderRadius: 3, backgroundColor: NONE, borderWidth: 1, borderColor: LINE }} />
-              <T style={{ color: MUTED, fontSize: 12, fontWeight: '900' }}>미체크</T>
-            </View>
-
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-              <View
-                style={{
-                  width: 10,
-                  height: 10,
-                  borderRadius: 3,
-                  backgroundColor: rgba(FOCUS, 0.9),
-                  borderWidth: 1,
-                  borderColor: LINE,
-                }}
-              />
-              <T style={{ color: MUTED, fontSize: 12, fontWeight: '900' }}>완료</T>
-            </View>
-          </View>
-
-          <Pressable
-            onPress={() => {
-              setHideNone((v) => !v);
-              setSelectedDate(null);
-            }}
-            hitSlop={8}
-            style={{
-              flexDirection: 'row',
-              alignItems: 'center',
-              gap: 10,
-              paddingVertical: 8,
-              paddingHorizontal: 10,
-              borderRadius: 999,
-              backgroundColor: '#0F151D',
-              borderWidth: 1,
-              borderColor: LINE,
-            }}
-          >
-            <T style={{ color: MUTED, fontWeight: '900', fontSize: 12 }}>미체크 숨김</T>
-
-            <View
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            {/* 기분보기 */}
+            <Pressable
+              onPress={() => setShowMoodOnCalendar((v) => !v)}
+              hitSlop={8}
               style={{
-                width: 44,
-                height: 26,
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: 8,
+                paddingVertical: 8,
+                paddingHorizontal: 10,
                 borderRadius: 999,
-                backgroundColor: hideNone ? rgba(FOCUS, 0.22) : 'rgba(143,163,184,0.14)',
+                backgroundColor: '#0F151D',
                 borderWidth: 1,
-                borderColor: hideNone ? 'rgba(76,201,255,0.45)' : 'rgba(143,163,184,0.28)',
-                padding: 3,
-                justifyContent: 'center',
+                borderColor: LINE,
               }}
             >
+              <T style={{ color: MUTED, fontWeight: '900', fontSize: 12 }}>기분보기</T>
+
               <View
                 style={{
-                  width: 20,
-                  height: 20,
+                  width: 44,
+                  height: 26,
                   borderRadius: 999,
-                  backgroundColor: hideNone ? FOCUS : '#9BB0C8',
-                  transform: [{ translateX: hideNone ? 18 : 0 }],
+                  backgroundColor: showMoodOnCalendar ? 'rgba(255,255,255,0.10)' : 'rgba(143,163,184,0.14)',
+                  borderWidth: 1,
+                  borderColor: showMoodOnCalendar ? 'rgba(255,255,255,0.20)' : 'rgba(143,163,184,0.28)',
+                  padding: 3,
+                  justifyContent: 'center',
                 }}
-              />
-            </View>
-          </Pressable>
+              >
+                <View
+                  style={{
+                    width: 20,
+                    height: 20,
+                    borderRadius: 999,
+                    backgroundColor: showMoodOnCalendar ? TEXT : '#9BB0C8',
+                    transform: [{ translateX: showMoodOnCalendar ? 18 : 0 }],
+                  }}
+                />
+              </View>
+            </Pressable>
+
+            {/* 미체크 숨김 */}
+            <Pressable
+              onPress={() => {
+                setHideNone((v) => !v);
+                setSelectedDate(null);
+              }}
+              hitSlop={8}
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: 10,
+                paddingVertical: 8,
+                paddingHorizontal: 10,
+                borderRadius: 999,
+                backgroundColor: '#0F151D',
+                borderWidth: 1,
+                borderColor: LINE,
+              }}
+            >
+              <T style={{ color: MUTED, fontWeight: '900', fontSize: 12 }}>미체크 숨김</T>
+
+              <View
+                style={{
+                  width: 44,
+                  height: 26,
+                  borderRadius: 999,
+                  backgroundColor: hideNone ? rgba(FOCUS, 0.22) : 'rgba(143,163,184,0.14)',
+                  borderWidth: 1,
+                  borderColor: hideNone ? 'rgba(76,201,255,0.45)' : 'rgba(143,163,184,0.28)',
+                  padding: 3,
+                  justifyContent: 'center',
+                }}
+              >
+                <View
+                  style={{
+                    width: 20,
+                    height: 20,
+                    borderRadius: 999,
+                    backgroundColor: hideNone ? FOCUS : '#9BB0C8',
+                    transform: [{ translateX: hideNone ? 18 : 0 }],
+                  }}
+                />
+              </View>
+            </Pressable>
+          </View>
         </View>
 
         {(selectedPretty || tip) && (
@@ -544,12 +608,56 @@ export default function CalendarScreen(
         )}
 
         <View style={{ marginTop: 12 }}>
-          <T style={{ color: TEXT, fontSize: 14, fontWeight: '450', marginBottom: 8 }}>
+          <T style={{ color: TEXT, fontSize: 14, fontWeight: '500', marginBottom: 8 }}>
             {selectedDate ? `${dayjs(selectedDate).format('M/D')} 기록` : '날짜를 선택해 주세요'}
           </T>
 
           {!selectedDate ? null : (
             <>
+              {/* 그날의 기분 */}
+              <View
+                style={{
+                  backgroundColor: CARD,
+                  borderRadius: 16,
+                  borderWidth: 1,
+                  borderColor: LINE,
+                  padding: 12,
+                  marginBottom: 10,
+                }}
+              >
+                <T style={{ color: TEXT, fontWeight: '900' }}>그날의 기분</T>
+
+                <View
+                  style={{
+                    marginTop: 8,
+                    backgroundColor: '#0F151D',
+                    borderRadius: 14,
+                    borderWidth: 1,
+                    borderColor: LINE,
+                    padding: 12,
+                    flexDirection: 'row',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                  }}
+                >
+                  {!selectedMood ? (
+                    <T style={{ color: MUTED, fontWeight: '900', fontSize: 12 }}>기분 기록 없음</T>
+                  ) : (
+                    <>
+                      <T style={{ color: selectedMood.tx, fontWeight: '900', fontSize: 16 }}>
+                        {selectedMood.emoji} {selectedMood.label}
+                      </T>
+                      <T style={{ color: MUTED, fontWeight: '900', fontSize: 12 }}>{selectedMood.sub}</T>
+                    </>
+                  )}
+                </View>
+
+                <T style={{ color: MUTED, fontSize: 12, marginTop: 8 }}>
+                  기분은 “오늘 화면”에서 기록됩니다. (캘린더에서는 조회만 합니다)
+                </T>
+              </View>
+
+              {/* 이하 기존 날짜별 기록 */}
               {selectedItems.restDay && (
                 <View
                   style={{
@@ -646,6 +754,8 @@ export default function CalendarScreen(
             </>
           )}
         </View>
+
+        {loading ? null : null}
       </ScrollView>
     </ScreenContainer>
   );

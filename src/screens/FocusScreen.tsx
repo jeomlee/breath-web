@@ -39,18 +39,26 @@ function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
 }
 
+type Phase = 'idle' | 'running' | 'paused' | 'done';
+
 export default function FocusScreen() {
   const [mode, setMode] = useState<'focus' | 'rest'>('focus');
   const ACCENT = mode === 'rest' ? GREEN : BLUE;
 
-  const [minutes, setMinutes] = useState(5);
+  // ✅ 설정값(휠)
+  const [minutes, setMinutes] = useState(0);
   const [seconds, setSeconds] = useState(0);
   const configuredTotal = useMemo(() => minutes * 60 + seconds, [minutes, seconds]);
 
-  const [remaining, setRemaining] = useState(configuredTotal);
-  const [running, setRunning] = useState(false);
+  // ✅ 상태머신
+  const [phase, setPhase] = useState<Phase>('idle');
+  const running = phase === 'running';
+  const locked = phase !== 'idle'; // idle이 아닐 때는 설정 변경/빠른 시간/모드 변경 잠금
 
+  const [remaining, setRemaining] = useState(configuredTotal);
   const [settingOpen, setSettingOpen] = useState(false);
+
+  // ✅ 모달 휠 값(픽커)
   const [mPick, setMPick] = useState(minutes);
   const [sPick, setSPick] = useState(seconds);
 
@@ -72,69 +80,158 @@ export default function FocusScreen() {
     []
   );
 
+  // ✅ 종료 진동 강화 (여러 번)
+  const finishVibeRef = useRef<any>(null);
   const vibrateFinish = () => {
     try {
-      Vibration.vibrate([0, 180, 80, 180, 80, 240]);
+      if (finishVibeRef.current) {
+        clearTimeout(finishVibeRef.current);
+        finishVibeRef.current = null;
+      }
+
+      Vibration.vibrate([0, 220, 120, 220, 120, 260, 140, 260, 140, 320]);
+
+      finishVibeRef.current = setTimeout(() => {
+        try {
+          Vibration.vibrate(300);
+        } catch {}
+      }, 520);
     } catch {}
   };
 
+  // ✅ 핵심: "설정 변경 시 remaining 동기화"는 오직 idle에서만
+  // (paused에서 running=false라고 리셋되면 안 됨)
   useEffect(() => {
-    if (!running) setRemaining(configuredTotal);
-  }, [configuredTotal, running]);
+    if (phase === 'idle') setRemaining(configuredTotal);
+  }, [configuredTotal, phase]);
 
+  // ✅ running일 때만 interval
   useEffect(() => {
-    if (!running) return;
+    if (phase !== 'running') return;
+
     tickRef.current = setInterval(() => {
       setRemaining((r) => Math.max(0, r - 1));
     }, 1000);
+
     return () => {
       if (tickRef.current) clearInterval(tickRef.current);
       tickRef.current = null;
     };
-  }, [running]);
+  }, [phase]);
 
+  // ✅ 완료 처리
   useEffect(() => {
-    if (!running || remaining > 0) return;
-    setRunning(false);
+    if (phase !== 'running') return;
+    if (remaining > 0) return;
+
+    // 끝났으면 즉시 멈추고 done으로
+    if (tickRef.current) {
+      clearInterval(tickRef.current);
+      tickRef.current = null;
+    }
+    setPhase('done');
     vibrateFinish();
     Alert.alert('세션이 완료되었습니다');
-  }, [remaining, running]);
+  }, [remaining, phase]);
 
-  const start = () => {
-    if (configuredTotal <= 0 || running) return;
-    if (remaining <= 0) setRemaining(configuredTotal);
-    setRunning(true);
+  // ✅ 언마운트 정리
+  useEffect(() => {
+    return () => {
+      if (finishVibeRef.current) {
+        clearTimeout(finishVibeRef.current);
+        finishVibeRef.current = null;
+      }
+      if (tickRef.current) {
+        clearInterval(tickRef.current);
+        tickRef.current = null;
+      }
+    };
+  }, []);
+
+  const startOrResume = () => {
+    if (configuredTotal <= 0) return; // 0:0이면 시작 불가
+
+    // paused면 그대로 재개
+    if (phase === 'paused') {
+      setPhase('running');
+      return;
+    }
+
+    // done이면 설정값으로 복귀 후 시작
+    if (phase === 'done') {
+      setRemaining(configuredTotal);
+      setPhase('running');
+      return;
+    }
+
+    // idle이면 설정값으로 시작
+    if (phase === 'idle') {
+      setRemaining(configuredTotal);
+      setPhase('running');
+    }
   };
 
   const pause = () => {
-    if (!running) return;
-    setRunning(false);
+    if (phase !== 'running') return;
+
+    // ✅ 즉시 interval 정리(체감상 '딱 멈춤')
+    if (tickRef.current) {
+      clearInterval(tickRef.current);
+      tickRef.current = null;
+    }
+
+    setPhase('paused');
   };
 
+  /**
+   * ✅ Reset (권장 UX = A): "현재 설정한 시간으로 되돌리기"
+   */
   const reset = () => {
-    setRunning(false);
+    if (tickRef.current) {
+      clearInterval(tickRef.current);
+      tickRef.current = null;
+    }
+    setPhase('idle');
     setRemaining(configuredTotal);
   };
 
+  /**
+   * ✅ Clear (B는 롱프레스): 설정 자체 0:0 초기화
+   */
+  const clearSetting = () => {
+    if (locked) return;
+    Alert.alert('시간을 초기화할까요?', '분/초 설정을 0:0으로 되돌립니다.', [
+      { text: '취소', style: 'cancel' },
+      {
+        text: '초기화',
+        style: 'destructive',
+        onPress: () => {
+          setMinutes(0);
+          setSeconds(0);
+          // idle이라 remaining은 useEffect로 자동 동기화됨
+        },
+      },
+    ]);
+  };
+
   const setQuick = (sec: number) => {
-    if (running) return;
+    if (locked) return;
     setMinutes(Math.floor(sec / 60));
     setSeconds(sec % 60);
-    setRemaining(sec);
   };
 
   const openSetting = () => {
+    if (locked) return;
     setMPick(minutes);
     setSPick(seconds);
     setSettingOpen(true);
   };
 
   const applySetting = () => {
-    const m = clamp(mPick, 0, 999);
+    const m = clamp(mPick, 0, 120);
     const s = clamp(sPick, 0, 59);
     setMinutes(m);
     setSeconds(s);
-    setRemaining(m * 60 + s);
     setSettingOpen(false);
   };
 
@@ -153,7 +250,8 @@ export default function FocusScreen() {
   const SEG_PAD = 6;
 
   const slide = useRef(new Animated.Value(mode === 'rest' ? 1 : 0)).current;
-  const trackWRef = useRef(0);
+  const [trackW, setTrackW] = useState(0);
+  const [txAnim, setTxAnim] = useState<any>(slide.interpolate({ inputRange: [0, 1], outputRange: [0, 0] }));
 
   useEffect(() => {
     Animated.timing(slide, {
@@ -165,41 +263,22 @@ export default function FocusScreen() {
   }, [mode, slide]);
 
   const onTrackLayout = (e: any) => {
-    trackWRef.current = e?.nativeEvent?.layout?.width ?? 0;
+    setTrackW(e?.nativeEvent?.layout?.width ?? 0);
   };
 
-  // 필의 이동 거리: (트랙 너비 - 양옆 패딩*2 - 필너비) / 1  (2분할이라 = half)
-  const pillTranslateX = slide.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0, 1], // 실제 값은 렌더 시 계산해서 transform에 넣기 어려움 → 아래에서 Animated multiply 방식 사용
-  });
-
-  // Animated로 “정확한 px”을 넣으려면, trackWidth가 필요해서 아래처럼 계산:
-  // tx = slide * (innerWidth/2)
-  const tx = slide.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0, 100], // 임시값, 렌더에서 width 측정 후 setValue로 재설정
-  });
-
-  // trackW가 바뀌면 outputRange를 갱신하기 위해 별도 Animated.Value로 다시 세팅
-  const txRef = useRef(tx);
-  const [txAnim, setTxAnim] = useState(txRef.current);
-
   useEffect(() => {
-    // track width 측정 후에 정확한 이동거리 계산해서 interpolate 다시 만들기
-    const w = trackWRef.current;
-    if (!w) return;
-    const inner = Math.max(0, w - SEG_PAD * 2);
+    if (!trackW) return;
+    const inner = Math.max(0, trackW - SEG_PAD * 2);
     const half = inner / 2;
 
     const nextTx = slide.interpolate({
       inputRange: [0, 1],
       outputRange: [0, half],
     });
-    txRef.current = nextTx;
     setTxAnim(nextTx);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [trackWRef.current]);
+  }, [trackW, slide]);
+
+  const primaryLabel = phase === 'running' ? '일시정지' : phase === 'paused' ? '재개' : '시작';
 
   return (
     <ScreenContainer bg={BG} barStyle="light-content">
@@ -212,11 +291,11 @@ export default function FocusScreen() {
         <View>
           <T style={{ color: TEXT, fontSize: 30, fontWeight: '900' }}>Focus</T>
           <T style={{ color: MUTED, marginTop: 6 }}>
-            {mode === 'rest' ? '휴식도 중요합니다' : '짧아도 괜찮답니다'}
+            {mode === 'rest' ? '휴식도 중요합니다 잊지마세요' : '짧아도 괜찮답니다 호흡에 집중해보세요'}
           </T>
         </View>
 
-        {/* 모드 (✅ 1번: 슬라이딩 인디케이터 세그먼트) */}
+        {/* 모드 */}
         <View
           style={{
             marginTop: 12,
@@ -242,10 +321,9 @@ export default function FocusScreen() {
               flexDirection: 'row',
               position: 'relative',
               overflow: 'hidden',
-              opacity: running ? 0.65 : 1,
+              opacity: locked ? 0.65 : 1,
             }}
           >
-            {/* 슬라이딩 필 */}
             <Animated.View
               pointerEvents="none"
               style={{
@@ -262,29 +340,18 @@ export default function FocusScreen() {
               }}
             />
 
-            {/* 버튼 2개 */}
             <Pressable
-              disabled={running}
+              disabled={locked}
               onPress={() => setMode('focus')}
-              style={{
-                flex: 1,
-                alignItems: 'center',
-                justifyContent: 'center',
-                borderRadius: 14,
-              }}
+              style={{ flex: 1, alignItems: 'center', justifyContent: 'center', borderRadius: 14 }}
             >
               <T style={{ color: mode === 'focus' ? ACCENT : MUTED, fontWeight: '900' }}>집중</T>
             </Pressable>
 
             <Pressable
-              disabled={running}
+              disabled={locked}
               onPress={() => setMode('rest')}
-              style={{
-                flex: 1,
-                alignItems: 'center',
-                justifyContent: 'center',
-                borderRadius: 14,
-              }}
+              style={{ flex: 1, alignItems: 'center', justifyContent: 'center', borderRadius: 14 }}
             >
               <T style={{ color: mode === 'rest' ? ACCENT : MUTED, fontWeight: '900' }}>휴식</T>
             </Pressable>
@@ -302,11 +369,11 @@ export default function FocusScreen() {
             padding: 16,
           }}
         >
-          {/* ✅ 카드 우측 상단: 시간 설정 */}
+          {/* 우측 상단: 시간 설정 */}
           <View style={{ position: 'absolute', top: 12, right: 12, zIndex: 10 }}>
             <Pressable
               onPress={openSetting}
-              disabled={running}
+              disabled={locked}
               style={{
                 paddingVertical: 6,
                 paddingHorizontal: 10,
@@ -314,7 +381,7 @@ export default function FocusScreen() {
                 backgroundColor: '#0E141C',
                 borderWidth: 1,
                 borderColor: LINE,
-                opacity: running ? 0.6 : 1,
+                opacity: locked ? 0.6 : 1,
               }}
             >
               <T style={{ color: MUTED, fontWeight: '900', fontSize: 12 }}>시간 설정</T>
@@ -350,33 +417,40 @@ export default function FocusScreen() {
 
             <View style={{ flexDirection: 'row', gap: 10, marginTop: 14, width: '100%' }}>
               <Pressable
-                onPress={() => (running ? pause() : start())}
+                onPress={() => (phase === 'running' ? pause() : startOrResume())}
+                disabled={configuredTotal <= 0}
                 style={{
                   flex: 1,
                   paddingVertical: 14,
                   borderRadius: 16,
                   alignItems: 'center',
+                  justifyContent: 'center', // ✅ 세로 중앙
                   backgroundColor: `${ACCENT}2E`,
                   borderWidth: 1,
                   borderColor: `${ACCENT}59`,
+                  opacity: configuredTotal <= 0 ? 0.45 : 1,
                 }}
               >
-                <T style={{ color: ACCENT, fontWeight: '900' }}>{running ? '일시정지' : '시작'}</T>
+                <T style={{ color: ACCENT, fontWeight: '900' }}>{primaryLabel}</T>
               </Pressable>
 
               <Pressable
                 onPress={reset}
+                onLongPress={clearSetting}
+                delayLongPress={450}
                 style={{
                   flex: 1,
                   paddingVertical: 14,
                   borderRadius: 16,
                   alignItems: 'center',
+                  justifyContent: 'center',
                   backgroundColor: '#0E141C',
                   borderWidth: 1,
                   borderColor: LINE,
                 }}
               >
                 <T style={{ color: MUTED, fontWeight: '900' }}>리셋</T>
+                <T style={{ color: MUTED, fontSize: 10, marginTop: 4, opacity: 0.7 }}>길게: 초기화</T>
               </Pressable>
             </View>
 
@@ -387,7 +461,7 @@ export default function FocusScreen() {
                 <Pressable
                   key={q.label}
                   onPress={() => setQuick(q.sec)}
-                  disabled={running}
+                  disabled={locked}
                   style={{
                     paddingVertical: 6,
                     paddingHorizontal: 10,
@@ -395,7 +469,7 @@ export default function FocusScreen() {
                     backgroundColor: '#0E141C',
                     borderWidth: 1,
                     borderColor: LINE,
-                    opacity: running ? 0.6 : 1,
+                    opacity: locked ? 0.6 : 1,
                   }}
                 >
                   <T style={{ color: MUTED, fontWeight: '900', fontSize: 11 }}>{q.label}</T>
@@ -405,7 +479,7 @@ export default function FocusScreen() {
           </View>
         </View>
 
-        {/* 설정 모달 (유지) */}
+        {/* 설정 모달 */}
         <Modal transparent visible={settingOpen} animationType="fade" onRequestClose={() => setSettingOpen(false)}>
           <Pressable style={styles.backdrop} onPress={() => setSettingOpen(false)} />
           <View style={styles.modalCenter}>
@@ -413,16 +487,28 @@ export default function FocusScreen() {
               <T style={{ color: TEXT, fontSize: 18, fontWeight: '900' }}>시간 설정</T>
               <T style={{ color: MUTED, marginTop: 6 }}>휠로 시간을 맞춰주세요.</T>
 
-              <View style={{ flexDirection: 'row', gap: 12, marginTop: 14 }}>
-                <Wheel values={MINUTES} value={mPick} onChange={setMPick} />
-                <Wheel values={SECONDS} value={sPick} onChange={setSPick} />
+              <View style={{ marginTop: 14, alignItems: 'center', justifyContent: 'center' }}>
+                <View style={{ flexDirection: 'row', gap: 14, alignItems: 'center', justifyContent: 'center' }}>
+                  <View style={{ alignItems: 'center' }}>
+                    <T style={{ color: MUTED, fontWeight: '900', marginBottom: 8, fontSize: 12 }}>분</T>
+                    <Wheel values={MINUTES} value={mPick} onChange={setMPick} width={132} itemHeight={44} visibleCount={5} />
+                  </View>
+
+                  <View style={{ alignItems: 'center' }}>
+                    <T style={{ color: MUTED, fontWeight: '900', marginBottom: 8, fontSize: 12 }}>초</T>
+                    <Wheel values={SECONDS} value={sPick} onChange={setSPick} width={132} itemHeight={44} visibleCount={5} />
+                  </View>
+                </View>
               </View>
 
               <View style={{ flexDirection: 'row', gap: 10, marginTop: 14 }}>
                 <Pressable onPress={() => setSettingOpen(false)} style={styles.modalBtn}>
                   <T style={{ color: MUTED, fontWeight: '900' }}>취소</T>
                 </Pressable>
-                <Pressable onPress={applySetting} style={[styles.modalBtn, { backgroundColor: `${ACCENT}2E`, borderColor: `${ACCENT}59` }]}>
+                <Pressable
+                  onPress={applySetting}
+                  style={[styles.modalBtn, { backgroundColor: `${ACCENT}2E`, borderColor: `${ACCENT}59` }]}
+                >
                   <T style={{ color: ACCENT, fontWeight: '900' }}>적용</T>
                 </Pressable>
               </View>
@@ -456,6 +542,7 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
     borderRadius: 16,
     alignItems: 'center',
+    justifyContent: 'center',
     backgroundColor: '#0E141C',
     borderWidth: 1,
     borderColor: LINE,

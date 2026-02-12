@@ -9,6 +9,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   SafeAreaView,
+  DeviceEventEmitter,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { supabase } from '../api/supabaseClient';
@@ -19,6 +20,14 @@ const LINE = '#1E2A38';
 const TEXT = '#EAF2FF';
 const MUTED = '#8FA3B8';
 const BLUE = '#4CC9FF';
+
+type Routine = {
+  id: string;
+  title: string;
+  sort_order: number;
+  is_active: boolean;
+  group_key: string | null;
+};
 
 export default function RoutineCreateScreen() {
   const navigation = useNavigation<any>();
@@ -47,10 +56,28 @@ export default function RoutineCreateScreen() {
         sort_order: Date.now(),
       };
 
-      const { error } = await supabase.from('routines').insert(payload as any);
+      // ✅ insert 후 생성 row를 바로 반환받기 (대시보드 즉시 반영 재료)
+      const { data, error } = await supabase
+        .from('routines')
+        .insert(payload as any)
+        .select('id,title,sort_order,is_active,group_key')
+        .single();
+
       if (error) return Alert.alert('추가에 실패했습니다', error.message);
 
-      Alert.alert('추가 완료', '대시보드에 반영됩니다.');
+      // ✅ iOS스럽게: 알럿 띄우느라 UX 끊지 말고, 바로 반영 + 뒤로가기
+      const created: Routine = {
+        id: data.id,
+        title: data.title,
+        sort_order: data.sort_order,
+        is_active: data.is_active,
+        group_key: data.group_key ?? null,
+      };
+
+      // ✅ Dashboard/Insights 등 즉시 갱신 (가벼움: 1줄 삽입 + silent sync)
+      DeviceEventEmitter.emit('ROUTINE_CREATED', created);
+      DeviceEventEmitter.emit('ROUTINES_CHANGED'); // (선택) 전체 reload 트리거도 같이
+
       navigation.goBack();
     } catch (e: any) {
       Alert.alert('추가에 실패했습니다', e?.message ?? '알 수 없는 오류가 발생했습니다.');
@@ -70,6 +97,7 @@ export default function RoutineCreateScreen() {
           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
             <Pressable
               onPress={() => navigation.goBack()}
+              disabled={saving}
               style={{
                 paddingVertical: 10,
                 paddingHorizontal: 12,
@@ -77,12 +105,12 @@ export default function RoutineCreateScreen() {
                 backgroundColor: CARD,
                 borderWidth: 1,
                 borderColor: LINE,
+                opacity: saving ? 0.7 : 1,
               }}
             >
               <Text style={{ color: MUTED, fontWeight: '900' }}>←</Text>
             </Pressable>
 
-            {/* ✅ 대시보드 용어와 통일: "새 호흡" */}
             <Text style={{ color: TEXT, fontSize: 16, fontWeight: '900' }}>새 호흡</Text>
 
             <View style={{ width: 44 }} />
@@ -105,11 +133,12 @@ export default function RoutineCreateScreen() {
               ref={inputRef}
               value={title}
               onChangeText={setTitle}
-              placeholder="예) 5분 호흡"
+              placeholder="예) 물마시기"
               placeholderTextColor="#536274"
               autoFocus
               returnKeyType="done"
               onSubmitEditing={save}
+              editable={!saving}
               style={{
                 color: TEXT,
                 fontSize: 16,
@@ -121,10 +150,10 @@ export default function RoutineCreateScreen() {
                 borderColor: LINE,
                 paddingHorizontal: 12,
                 fontWeight: '800',
+                opacity: saving ? 0.85 : 1,
               }}
             />
 
-            {/* ✅ 존댓말로 변경 */}
             <Text style={{ color: MUTED, fontSize: 12, marginTop: 10, lineHeight: 18 }}>
               대시보드에서 바로 체크하실 수 있습니다.
             </Text>

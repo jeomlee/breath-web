@@ -9,6 +9,7 @@ import {
   DeviceEventEmitter,
   RefreshControl,
   type TextProps,
+  type EmitterSubscription,
 } from 'react-native';
 import dayjs from 'dayjs';
 import { supabase } from '../api/supabaseClient';
@@ -57,6 +58,10 @@ type InsightsSettings = {
 
 const SETTINGS_CHANGED_EVENT = 'settingsChanged';
 
+// ✅ 앱 전역 이벤트(추가/삭제 즉시 반영용)
+const ROUTINE_CREATED_EVENT = 'ROUTINE_CREATED';
+const ROUTINE_DELETED_EVENT = 'ROUTINE_DELETED';
+
 /* =========================
    Colors
 ========================= */
@@ -101,6 +106,15 @@ function clamp01(x: number) {
   return Math.max(0, Math.min(1, x));
 }
 
+/** ✅ ISO(UTC/Z 포함) → "로컬 날짜키"로 확정 */
+function isoToLocalDateKey(iso: string) {
+  return dayjs(new Date(iso)).format('YYYY-MM-DD');
+}
+
+function sortRoutines(list: Routine[]) {
+  return [...list].sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
+}
+
 export default function InsightsScreen() {
   const navigation = useNavigation<NativeStackNavigationProp<InsightsStackParamList>>();
 
@@ -116,14 +130,25 @@ export default function InsightsScreen() {
   const weeks = 8;
   const days = weeks * 7;
 
-  const start = useMemo(
-    () => dayjs().startOf('day').subtract(days - 1, 'day').format('YYYY-MM-DD'),
-    [days]
-  );
-  const end = useMemo(() => dayjs().startOf('day').format('YYYY-MM-DD'), []);
+  // ✅ “매 렌더마다 now가 바뀌는 문제”를 제거하면서도,
+  //    날짜 기준은 "오늘" 기준으로 안정적으로 유지
+  const todayKey = dayjs().format('YYYY-MM-DD');
+  const todayText = dayjs().format('M/D');
 
-  const todayKey = useMemo(() => dayjs().format('YYYY-MM-DD'), []);
-  const todayText = useMemo(() => dayjs().format('M/D'), []);
+  // ✅ 잔디 기간: 오늘 00:00 로컬 기준
+  const today0 = useMemo(() => dayjs().startOf('day'), [todayKey]);
+  const end = useMemo(() => today0.format('YYYY-MM-DD'), [today0]);
+  const start = useMemo(() => today0.subtract(days - 1, 'day').format('YYYY-MM-DD'), [today0, days]);
+
+  // ✅ 세션 조회 기간: 이번달~저번달 (월 단위로만 갱신)
+  const monthKey = dayjs().format('YYYY-MM');
+  const sessionRange = useMemo(() => {
+    const m0 = dayjs().startOf('month');
+    return {
+      from: m0.subtract(1, 'month').startOf('day').toISOString(),
+      to: dayjs().endOf('day').toISOString(),
+    };
+  }, [monthKey, todayKey]);
 
   // ✅ 잔디 알파(기본 진하기)
   const unifiedAlphaByLv = useMemo(() => [0, 0.38, 0.56, 0.74, 0.92] as const, []);
@@ -171,8 +196,8 @@ export default function InsightsScreen() {
       .from('focus_sessions')
       .select('id,user_id,mode,started_at,ended_at,planned_seconds,focused_seconds')
       .eq('user_id', user.id)
-      .gte('started_at', dayjs().startOf('month').subtract(1, 'month').toISOString())
-      .lte('started_at', dayjs().endOf('day').toISOString());
+      .gte('started_at', sessionRange.from)
+      .lte('started_at', sessionRange.to);
 
     const [{ data: rData, error: rErr }, { data: lData, error: lErr }, { data: sData, error: sErr }] =
       await Promise.all([rReq, lReq, sReq]);
@@ -180,11 +205,11 @@ export default function InsightsScreen() {
     if (rErr) return Alert.alert('기록 불러오기 실패', rErr.message);
     if (lErr) return Alert.alert('기록 불러오기 실패', lErr.message);
 
-    setRoutines((rData as any) || []);
+    setRoutines(sortRoutines((rData as any) || []));
     setLogs((lData as any) || []);
     if (!sErr) setSessions((sData as any) || []);
     else setSessions([]);
-  }, [end, loadSettings, start]);
+  }, [end, loadSettings, sessionRange.from, sessionRange.to, start]);
 
   const onPullRefresh = useCallback(async () => {
     if (refreshing) return;
@@ -196,6 +221,7 @@ export default function InsightsScreen() {
     }
   }, [load, refreshing]);
 
+  // ✅ 최초 로드 + 설정 변경 이벤트
   useEffect(() => {
     load();
 
@@ -212,6 +238,43 @@ export default function InsightsScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ✅ ✅ ✅ 호흡 추가/삭제 이벤트 수신 → 인사이트 즉시 반영(가볍게)
+  useEffect(() => {
+    const subs: EmitterSubscription[] = [];
+
+    subs.push(
+      DeviceEventEmitter.addListener(ROUTINE_CREATED_EVENT, (created: any) => {
+        // created: routines row를 select로 받아온 형태 권장
+        if (!created?.id) return;
+
+        setRoutines((prev) => {
+          const filtered = prev.filter((r) => r.id !== created.id);
+          return sortRoutines([...filtered, created as Routine]);
+        });
+
+        // 로그/세션은 새 루틴엔 없음 → 건드릴 필요 없음
+      })
+    );
+
+    subs.push(
+      DeviceEventEmitter.addListener(ROUTINE_DELETED_EVENT, (payload: any) => {
+        const rid = payload?.routineId;
+        if (!rid) return;
+
+        // 1) 루틴 목록에서 즉시 제거
+        setRoutines((prev) => prev.filter((r) => r.id !== rid));
+
+        // 2) 세부기록(로그)에서도 해당 루틴 기록 제거(카드 잔디가 남는 문제 방지)
+        setLogs((prev) => prev.filter((l) => l.routine_id !== rid));
+
+        // 3) 세션은 루틴과 무관하니 유지
+      })
+    );
+
+    return () => subs.forEach((s) => s.remove());
+  }, []);
+
+  // ✅ realtime(있으면 좋지만) → 너무 자주 load 되지 않도록 1회 디바운스 유지
   useEffect(() => {
     if (!userId) return;
 
@@ -261,12 +324,15 @@ export default function InsightsScreen() {
   }, []);
 
   /* =====================================================
-     ✅ (핵심) 전체 잔디용: 날짜별 done/rest 집계 + 비율/우점에 따른 진하기
+     ✅ 전체 잔디용: 날짜별 done/rest 집계 + 비율/우점에 따른 진하기
   ===================================================== */
 
-  // ✅ log 기반: done/rest를 "카운트"로 집계
+  // ✅ log 기반: done/rest를 "카운트"로 집계 (둘 다 동일하게 '기록'으로 취급)
   const logAggByDay = useMemo(() => {
-    const byDay: Record<string, { done: number; rest: number; total: number; t: number; dominance: number; lv: number }> = {};
+    const byDay: Record<
+      string,
+      { done: number; rest: number; total: number; t: number; dominance: number; lv: number }
+    > = {};
     for (const d of dayList) {
       byDay[d] = { done: 0, rest: 0, total: 0, t: 0.5, dominance: 0, lv: 0 };
     }
@@ -282,28 +348,31 @@ export default function InsightsScreen() {
       const done = byDay[d].done;
       const rest = byDay[d].rest;
       const total = done + rest;
-      const t = total <= 0 ? 0.5 : done / total; // 0=휴식쪽, 1=완료쪽
-      const dominance = total <= 0 ? 0 : clamp01(Math.abs(t - 0.5) * 2); // 0(50:50)~1(한쪽만)
-      const lv = total <= 0 ? 0 : Math.max(1, intensity(total)); // 활동 있으면 최소 1
+      const t = total <= 0 ? 0.5 : done / total;
+      const dominance = total <= 0 ? 0 : clamp01(Math.abs(t - 0.5) * 2);
+      const lv = total <= 0 ? 0 : Math.max(1, intensity(total));
       byDay[d] = { ...byDay[d], total, t, dominance, lv };
     }
 
     return byDay;
   }, [dayList, logs, intensity]);
 
-  // ✅ session 기반: focus/rest 세션 비율로 집계
+  // ✅ session 기반: focus/rest 세션 비율로 집계 (✅ 로컬 날짜키로 변환)
   const sessionAggByDay = useMemo(() => {
-    const byDay: Record<string, { done: number; rest: number; total: number; t: number; dominance: number; lv: number }> = {};
+    const byDay: Record<
+      string,
+      { done: number; rest: number; total: number; t: number; dominance: number; lv: number }
+    > = {};
     for (const d of dayList) {
       byDay[d] = { done: 0, rest: 0, total: 0, t: 0.5, dominance: 0, lv: 0 };
     }
 
     for (const s of sessions) {
-      const d = dayjs(s.started_at).format('YYYY-MM-DD');
+      const d = isoToLocalDateKey(s.started_at);
       if (!byDay[d]) continue;
       const mode = (s.mode ?? 'focus') as 'focus' | 'rest';
       if (mode === 'rest') byDay[d].rest += 1;
-      else byDay[d].done += 1; // focus를 done 쪽으로 취급
+      else byDay[d].done += 1;
     }
 
     for (const d of dayList) {
@@ -319,12 +388,10 @@ export default function InsightsScreen() {
     return byDay;
   }, [dayList, sessions, intensity]);
 
-  // ✅ 전체 잔디: 어떤 집계를 쓸지 선택 + 최종 색/진하기 계산에 필요한 값들
   const unifiedAggByDay = useMemo(() => {
     return settings.color_mode === 'session_ratio' ? sessionAggByDay : logAggByDay;
   }, [logAggByDay, sessionAggByDay, settings.color_mode]);
 
-  // ✅ doneCount(표시용 요약은 기존대로: 완료 로그 기반)
   const dayDoneCount = useMemo(() => {
     const byDay: Record<string, number> = {};
     for (const row of logs) {
@@ -334,7 +401,15 @@ export default function InsightsScreen() {
     return byDay;
   }, [logs]);
 
-  // 통합 잔디: columns
+  const dayRestCount = useMemo(() => {
+    const byDay: Record<string, number> = {};
+    for (const row of logs) {
+      if (row.status !== 'rest') continue;
+      byDay[row.date_key] = (byDay[row.date_key] ?? 0) + 1;
+    }
+    return byDay;
+  }, [logs]);
+
   const unifiedGrid = useMemo(() => {
     const cols: { date: string; doneCount: number }[][] = [];
     for (let w = 0; w < weeks; w++) {
@@ -349,12 +424,9 @@ export default function InsightsScreen() {
     return cols;
   }, [weeks, dayList, dayDoneCount]);
 
-  const totalDone8w = useMemo(
-    () => Object.values(dayDoneCount).reduce((a, b) => a + b, 0),
-    [dayDoneCount]
-  );
+  const totalDone8w = useMemo(() => Object.values(dayDoneCount).reduce((a, b) => a + b, 0), [dayDoneCount]);
+  const totalRest8w = useMemo(() => Object.values(dayRestCount).reduce((a, b) => a + b, 0), [dayRestCount]);
 
-  // ✅ “오늘 셀” 위치
   const todayPos = useMemo(() => {
     for (let w = 0; w < unifiedGrid.length; w++) {
       const col = unifiedGrid[w];
@@ -365,7 +437,6 @@ export default function InsightsScreen() {
     return null;
   }, [unifiedGrid, todayKey]);
 
-  // ✅ 성능: 세부기록 계산(기존 유지)
   const routineStatusByDay = useMemo(() => {
     const map = new Map<string, Map<string, 'done' | 'rest'>>();
     for (const row of logs) {
@@ -382,14 +453,13 @@ export default function InsightsScreen() {
       string,
       {
         grid: { date: string; status: 'done' | 'rest' | 'none' }[][];
-        percent: number;
+        recordPercent: number;
         last7: number;
-        streak: number;
       }
     >();
 
-    const today0 = dayjs().startOf('day');
-    const start7 = today0.subtract(6, 'day');
+    const today0Local = dayjs().startOf('day');
+    const start7 = today0Local.subtract(6, 'day');
 
     for (const r of routines) {
       const m = routineStatusByDay.get(r.id) ?? new Map<string, 'done' | 'rest'>();
@@ -405,24 +475,18 @@ export default function InsightsScreen() {
         cols.push(col);
       }
 
-      let done = 0;
-      for (const d of dayList) if (m.get(d) === 'done') done++;
-      const percent = Math.round((done / days) * 100);
+      let recorded = 0;
+      for (const d of dayList) if (m.get(d) === 'done' || m.get(d) === 'rest') recorded++;
+      const recordPercent = Math.round((recorded / days) * 100);
 
       let l7 = 0;
       for (let i = 0; i < 7; i++) {
         const d = start7.add(i, 'day').format('YYYY-MM-DD');
-        if (m.get(d) === 'done') l7++;
+        const st = m.get(d);
+        if (st === 'done' || st === 'rest') l7++;
       }
 
-      let st = 0;
-      for (let i = 0; i < 365; i++) {
-        const d = today0.subtract(i, 'day').format('YYYY-MM-DD');
-        if (m.get(d) !== 'done') break;
-        st++;
-      }
-
-      out.set(r.id, { grid: cols, percent, last7: l7, streak: st });
+      out.set(r.id, { grid: cols, recordPercent, last7: l7 });
     }
 
     return out;
@@ -430,7 +494,6 @@ export default function InsightsScreen() {
 
   const routineList = useMemo(() => routines.slice(), [routines]);
 
-  // ✅ 전체 잔디 크기 2배 유지
   const UNIFIED_CELL = 20;
   const UNIFIED_GAP = 8;
 
@@ -454,17 +517,11 @@ export default function InsightsScreen() {
           />
         }
       >
-        {/* 제목 */}
-        <View style={{ paddingTop: 10 }}>
-          <T style={{ color: TEXT, fontSize: 22, fontWeight: '900' }}>인사이트</T>
+        <View style={{ paddingTop: 10, paddingBottom: 18 }}>
+          <T style={{ color: TEXT, fontSize: 30, fontWeight: '900' }}>인사이트</T>
         </View>
 
-        {/* 목표 태그 */}
-        <T style={{ color: TEXT, fontSize: 14, fontWeight: '900', marginTop: 14, marginBottom: 8 }}>
-          목표 태그
-        </T>
-
-        {/* ✅ 전체 잔디 카드 */}
+        {/* 전체 잔디 */}
         <View
           style={{
             backgroundColor: CARD,
@@ -484,7 +541,6 @@ export default function InsightsScreen() {
               justifyContent: 'space-between',
             }}
           >
-            {/* 헤더 + CTA 버튼 */}
             <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
               <T style={{ color: TEXT, fontSize: 14, fontWeight: '900' }}>전체 잔디</T>
 
@@ -503,9 +559,8 @@ export default function InsightsScreen() {
               </Pressable>
             </View>
 
-            {/* 잔디 */}
             <View style={{ marginTop: 14, alignItems: 'center' }}>
-              <View style={{ position: 'relative', alignItems: 'center', justifyContent: 'center' }}>
+              <View style={{ position: 'relative', alignItems: 'center' }}>
                 <View style={{ flexDirection: 'row' }}>
                   {unifiedGrid.map((col, w) => (
                     <View key={w} style={{ marginRight: w === unifiedGrid.length - 1 ? 0 : UNIFIED_GAP }}>
@@ -521,18 +576,13 @@ export default function InsightsScreen() {
                           lv: 0,
                         };
 
-                        // ✅ 비율(t)로 색 결정(초록↔파랑)
                         const baseRgb = mixHex(REST, FOCUS, agg.t);
 
-                        // ✅ 진하기:
-                        // - 활동량(lv) 기본 알파
-                        // - 우점(dominance)이 클수록 더 진하게
                         const baseAlpha = unifiedAlphaByLv[(agg.lv as 0 | 1 | 2 | 3 | 4) ?? 0] ?? 0.4;
-                        const dominanceBoost = 0.55 + 0.45 * agg.dominance; // 50:50이면 0.55배, 한쪽만이면 1.0배
+                        const dominanceBoost = 0.55 + 0.45 * agg.dominance;
                         const alpha = Math.min(0.95, baseAlpha * dominanceBoost);
 
                         const bg = agg.total <= 0 ? '#1A2330' : rgbaFromRgbString(baseRgb, alpha);
-
                         const isToday = dateKey === todayKey;
 
                         return (
@@ -554,45 +604,43 @@ export default function InsightsScreen() {
                   ))}
                 </View>
 
-                {/* 오늘 표시(텍스트) */}
                 {todayPos && (
                   <View
+                    pointerEvents="none"
                     style={{
                       position: 'absolute',
-                      left: todayPos.w * (UNIFIED_CELL + UNIFIED_GAP) + UNIFIED_CELL + 10,
-                      top: todayPos.rr * (UNIFIED_CELL + UNIFIED_GAP) + UNIFIED_CELL / 2 - 8,
+                      top: 7 * UNIFIED_CELL + 6 * UNIFIED_GAP + 6,
+                      left: todayPos.w * (UNIFIED_CELL + UNIFIED_GAP) + UNIFIED_CELL / 2 - 30,
+                      width: 60,
+                      alignItems: 'center',
                     }}
                   >
-                    <T style={{ color: MUTED, fontSize: 12, fontWeight: '900' }}>{todayLabel}</T>
+                    <T style={{ color: MUTED, fontSize: 10, fontWeight: '900', opacity: 0.9 }}>{todayLabel}</T>
                   </View>
                 )}
               </View>
 
-              {/* 요약 */}
               <View style={{ marginTop: 14, alignSelf: 'stretch' }}>
                 <T style={{ color: MUTED, fontSize: 12 }}>
                   {weeks}주 누적 완료 <T style={{ color: TEXT, fontWeight: '900' }}>{totalDone8w}</T>
+                  {'  '}·{'  '}
+                  휴식 <T style={{ color: TEXT, fontWeight: '900' }}>{totalRest8w}</T>
                 </T>
-                <T style={{ color: MUTED, fontSize: 12, marginTop: 6 }}>
-                  색은 휴식↔완료 비율에 따라 결정됩니다.
-                </T>
+                <T style={{ color: MUTED, fontSize: 12, marginTop: 6 }}>색은 휴식↔완료 비율에 따라 결정됩니다.</T>
               </View>
             </View>
           </View>
         </View>
 
-        {/* 세부기록 */}
-        <T style={{ color: TEXT, fontSize: 14, fontWeight: '900', marginTop: 16, marginBottom: 8 }}>
-          세부 기록
-        </T>
+        <T style={{ color: TEXT, fontSize: 14, fontWeight: '900', marginTop: 16, marginBottom: 8 }}>세부 기록</T>
 
+        {/* 세부 기록 카드들 */}
         <View style={{ flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between' }}>
           {routineList.map((r) => {
             const computed = routineComputed.get(r.id);
             const grid = computed?.grid ?? [];
-            const p = computed?.percent ?? 0;
+            const recordPercent = computed?.recordPercent ?? 0;
             const l7 = computed?.last7 ?? 0;
-            const st = computed?.streak ?? 0;
 
             return (
               <Pressable
@@ -602,7 +650,7 @@ export default function InsightsScreen() {
                     routineId: r.id,
                     title: r.title,
                     color: FOCUS,
-                  })
+                  } as any)
                 }
                 style={{
                   width: '48.5%',
@@ -614,7 +662,12 @@ export default function InsightsScreen() {
                   marginBottom: 10,
                 }}
               >
-                <T style={{ color: TEXT, fontSize: 13, fontWeight: '900' }} numberOfLines={1}>
+                {/* ✅ 우측 상단 디테일 힌트 */}
+                <View style={{ position: 'absolute', top: 8, right: 8, opacity: 0.9 }} pointerEvents="none">
+                  <T style={{ color: 'rgba(143,163,184,0.85)', fontWeight: '900' }}>{'>'}</T>
+                </View>
+
+                <T style={{ color: TEXT, fontSize: 13, fontWeight: '900', paddingRight: 14 }} numberOfLines={1}>
                   {r.title}
                 </T>
 
@@ -654,11 +707,14 @@ export default function InsightsScreen() {
                       borderColor: LINE,
                       borderRadius: 12,
                       padding: 8,
+                      alignItems: 'center',
+                      justifyContent: 'center',
                     }}
                   >
-                    <T style={{ color: MUTED, fontSize: 10, fontWeight: '900' }}>8주 달성률</T>
-                    <T style={{ color: TEXT, marginTop: 3, fontWeight: '900' }}>{p}%</T>
+                    <T style={{ color: MUTED, fontSize: 10, fontWeight: '900', textAlign: 'center' }}>8주 기록</T>
+                    <T style={{ color: TEXT, marginTop: 3, fontWeight: '900', textAlign: 'center' }}>{recordPercent}%</T>
                   </View>
+
                   <View
                     style={{
                       flex: 1,
@@ -667,16 +723,14 @@ export default function InsightsScreen() {
                       borderColor: LINE,
                       borderRadius: 12,
                       padding: 8,
+                      alignItems: 'center',
+                      justifyContent: 'center',
                     }}
                   >
-                    <T style={{ color: MUTED, fontSize: 10, fontWeight: '900' }}>최근 7일</T>
-                    <T style={{ color: TEXT, marginTop: 3, fontWeight: '900' }}>{l7}/7</T>
+                    <T style={{ color: MUTED, fontSize: 10, fontWeight: '900', textAlign: 'center' }}>최근 7일</T>
+                    <T style={{ color: TEXT, marginTop: 3, fontWeight: '900', textAlign: 'center' }}>{l7}/7</T>
                   </View>
                 </View>
-
-                <T style={{ color: MUTED, fontSize: 11, marginTop: 8 }}>
-                  연속 기록: <T style={{ color: TEXT, fontWeight: '900' }}>{st}</T>일
-                </T>
               </Pressable>
             );
           })}

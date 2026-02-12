@@ -1,3 +1,4 @@
+// src/screens/ShareRoutineCreateScreen.tsx
 import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import {
   View,
@@ -10,9 +11,10 @@ import {
   type TextProps,
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, type CompositeNavigationProp } from '@react-navigation/native';
+import type { BottomTabNavigationProp } from '@react-navigation/bottom-tabs';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import type { ConnectStackParamList } from '../navigation/types';
+import type { ConnectStackParamList, RootTabParamList } from '../navigation/types';
 import { supabase } from '../api/supabaseClient';
 import { ensureRoomForRoutine, type SharedRoom } from '../api/sharedRoutines';
 import ScreenContainer from '../components/ScreenContainer';
@@ -24,11 +26,13 @@ const MUTED = '#8FA3B8';
 const TEXT = '#EAF2FF';
 const BLUE = '#4CC9FF';
 
-type RoutineRow = { id: string; title: string; is_active: boolean; sort_order: number | null };
+type RoutineRow = {
+  id: string;
+  title: string;
+  is_active: boolean;
+  sort_order: number | null;
+};
 
-/* =========================
-   ✅ Text wrapper (폰트 스케일 고정)
-========================= */
 function T(props: TextProps) {
   return <RNText {...props} allowFontScaling={false} maxFontSizeMultiplier={1} />;
 }
@@ -53,7 +57,9 @@ function Card({ title, desc, children }: any) {
 }
 
 export default function ShareRoutineCreateScreen() {
-  const nav = useNavigation<NativeStackNavigationProp<ConnectStackParamList>>();
+  const nav = useNavigation<
+    CompositeNavigationProp<NativeStackNavigationProp<ConnectStackParamList>, BottomTabNavigationProp<RootTabParamList>>
+  >();
 
   const [routines, setRoutines] = useState<RoutineRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -78,15 +84,14 @@ export default function ShareRoutineCreateScreen() {
 
       if (error) throw error;
 
-      const list = ((data as any) || []) as RoutineRow[];
+      const list = (data ?? []) as RoutineRow[];
       setRoutines(list);
 
-      // 선택 유지(존재할 때만)
       if (selectedId && !list.some((r) => r.id === selectedId)) {
         setSelectedId(null);
       }
     } catch (e: any) {
-      Alert.alert('오류', e?.message ?? '기록을 불러오지 못했습니다.');
+      Alert.alert('오류', e?.message ?? '호흡을 불러오지 못했습니다.');
     } finally {
       setLoading(false);
     }
@@ -96,28 +101,51 @@ export default function ShareRoutineCreateScreen() {
     load();
   }, [load]);
 
-  const shareText = useMemo(() => {
-    if (!createdRoom) return '';
-    return `함께 기록을 진행해 보실까요?\n\n참여 코드: ${createdRoom.join_code}\n\n브리드 앱에서 [함께하기] → 코드로 참여하실 수 있습니다.`;
-  }, [createdRoom]);
+  const hasRoutines = routines.length > 0;
+
+  const selectedTitle = useMemo(() => {
+    const r = routines.find((x) => x.id === selectedId);
+    return r?.title ?? null;
+  }, [routines, selectedId]);
+
+  const canCreate = hasRoutines && !!selectedId && !creating;
 
   const createRoom = useCallback(async () => {
-    if (!selectedId) {
-      Alert.alert('안내', '먼저 기록을 선택해 주세요.');
-      return;
-    }
+    if (!selectedId) return;
 
-    setCreating(true);
-    try {
-      const room = await ensureRoomForRoutine(selectedId);
-      setCreatedRoom(room);
-      Alert.alert('완료', '참여 코드가 생성되었습니다.');
-    } catch (e: any) {
-      Alert.alert('오류', e?.message ?? '생성에 실패하였습니다.');
-    } finally {
-      setCreating(false);
-    }
-  }, [selectedId]);
+    const title = selectedTitle ?? '선택한 호흡';
+
+    Alert.alert(
+      '참여 코드 만들기',
+      `“${title}”을(를) 공유할까요?\n\n코드를 만든 뒤에는 복사/공유할 수 있어요.`,
+      [
+        { text: '취소', style: 'cancel' },
+        {
+          text: '만들기',
+          style: 'default',
+          onPress: async () => {
+            setCreating(true);
+            try {
+              const room = await ensureRoomForRoutine(selectedId);
+              setCreatedRoom(room);
+              Alert.alert('완료', '참여 코드가 생성되었습니다.');
+            } catch (e: any) {
+              Alert.alert('오류', e?.message ?? '생성에 실패하였습니다.');
+            } finally {
+              setCreating(false);
+            }
+          },
+        },
+      ]
+    );
+  }, [selectedId, selectedTitle]);
+
+  const shareText = useMemo(() => {
+    if (!createdRoom) return '';
+    const code = createdRoom.join_code;
+    const title = selectedTitle ? `“${selectedTitle}”` : '함께 호흡';
+    return `${code}`;
+  }, [createdRoom, selectedTitle]);
 
   const copyCode = async () => {
     if (!createdRoom?.join_code) return;
@@ -127,11 +155,7 @@ export default function ShareRoutineCreateScreen() {
 
   const shareNow = async () => {
     if (!shareText) return;
-    try {
-      await Share.share({ message: shareText });
-    } catch {
-      Alert.alert('안내', '공유를 진행하지 못했습니다.');
-    }
+    await Share.share({ message: shareText });
   };
 
   const goBoard = () => {
@@ -139,28 +163,21 @@ export default function ShareRoutineCreateScreen() {
     nav.navigate('SharedRoutineBoard', { roomId: createdRoom.id, routineTitle: undefined });
   };
 
-  const selectedTitle = useMemo(() => {
-    const r = routines.find((x) => x.id === selectedId);
-    return r?.title ?? null;
-  }, [routines, selectedId]);
+  const goCreateRoutine = useCallback(() => {
+    nav.navigate('Dashboard', { screen: 'RoutineCreate' });
+  }, [nav]);
 
   return (
     <ScreenContainer bg={BG} barStyle="light-content">
       <ScrollView
-        contentContainerStyle={{
-          paddingHorizontal: 16,
-          paddingTop: 12,
-          paddingBottom: 18,
-        }}
+        contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 12, paddingBottom: 18 }}
         refreshControl={<RefreshControl tintColor={BLUE} refreshing={loading} onRefresh={load} />}
         showsVerticalScrollIndicator={false}
       >
-        {/* 헤더 */}
+        {/* Header */}
         <View style={{ marginBottom: 8 }}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-            <T style={{ color: TEXT, fontSize: 24, fontWeight: '900' }}>내 기록 공유하기</T>
-
-            {/* ✅ 버튼스러운 "이전" */}
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+            <T style={{ color: TEXT, fontSize: 24, fontWeight: '900' }}>내 호흡 공유하기</T>
             <Pressable
               onPress={() => nav.goBack()}
               style={{
@@ -171,32 +188,43 @@ export default function ShareRoutineCreateScreen() {
                 borderWidth: 1,
                 borderColor: LINE,
               }}
-              hitSlop={10}
             >
               <T style={{ color: MUTED, fontWeight: '900', fontSize: 12 }}>이전</T>
             </Pressable>
           </View>
-
-          <T style={{ color: MUTED, marginTop: 6, lineHeight: 20 }}>
-            기록을 선택한 뒤, ‘참여 코드 만들기’를 눌러 생성하세요.
+          <T style={{ color: MUTED, marginTop: 6 }}>
+            호흡을 선택한 뒤, ‘참여 코드 만들기’를 눌러 생성하세요.
           </T>
         </View>
 
-        {/* 기록 선택 */}
-        <Card title="기록 선택" desc="먼저 공유할 기록을 고르세요. (선택만 됩니다)">
-          {routines.length === 0 ? (
-            <T style={{ color: MUTED }}>공유할 기록이 없습니다. 먼저 기록을 생성해 주세요.</T>
+        {/* 호흡 선택 */}
+        <Card title="호흡 선택" desc="먼저 공유할 호흡을 고르세요.">
+          {!hasRoutines ? (
+            <View style={{ gap: 10 }}>
+              <T style={{ color: MUTED }}>공유할 호흡이 없습니다.</T>
+              <Pressable
+                onPress={goCreateRoutine}
+                style={{
+                  borderRadius: 14,
+                  paddingVertical: 12,
+                  alignItems: 'center',
+                  backgroundColor: 'rgba(76,201,255,0.16)',
+                  borderWidth: 1,
+                  borderColor: 'rgba(76,201,255,0.25)',
+                }}
+              >
+                <T style={{ color: BLUE, fontWeight: '900' }}>호흡 만들기</T>
+              </Pressable>
+            </View>
           ) : (
             <View style={{ gap: 10 }}>
               {routines.map((r) => {
                 const selected = r.id === selectedId;
-
                 return (
                   <Pressable
                     key={r.id}
                     onPress={() => {
                       setSelectedId(r.id);
-                      // ✅ 다른 기록을 선택하면 기존 생성된 코드가 "다른 기록"일 수 있으니 초기화(혼란 방지)
                       setCreatedRoom(null);
                     }}
                     style={{
@@ -205,91 +233,52 @@ export default function ShareRoutineCreateScreen() {
                       borderColor: selected ? 'rgba(76,201,255,0.35)' : LINE,
                       borderRadius: 16,
                       padding: 12,
-                      flexDirection: 'row',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
                     }}
                   >
-                    <View style={{ flex: 1, paddingRight: 10 }}>
-                      <T style={{ color: TEXT, fontWeight: '900' }} numberOfLines={1}>
-                        {r.title}
-                      </T>
-                      <T style={{ color: MUTED, marginTop: 6, fontSize: 12, fontWeight: '900' }}>
-                        {selected ? '선택됨' : '눌러서 선택'}
-                      </T>
-                    </View>
-
-                    {/* ✅ 라디오 인디케이터 */}
-                    <View
-                      style={{
-                        width: 22,
-                        height: 22,
-                        borderRadius: 999,
-                        borderWidth: 2,
-                        borderColor: selected ? BLUE : 'rgba(143,163,184,0.35)',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                      }}
-                    >
-                      {selected ? (
-                        <View style={{ width: 10, height: 10, borderRadius: 999, backgroundColor: BLUE }} />
-                      ) : null}
-                    </View>
+                    <T style={{ color: TEXT, fontWeight: '900' }}>{r.title}</T>
+                    <T style={{ color: MUTED, marginTop: 6, fontSize: 12 }}>
+                      {selected ? '선택됨' : '눌러서 선택'}
+                    </T>
                   </Pressable>
                 );
               })}
             </View>
           )}
 
-          {/* ✅ 선택 후 생성 CTA (핵심) */}
+          {/* CTA */}
           <Pressable
             onPress={createRoom}
-            disabled={!selectedId || creating}
+            disabled={!canCreate}
             style={{
               marginTop: 12,
               borderRadius: 14,
               paddingVertical: 12,
               alignItems: 'center',
-              backgroundColor: !selectedId ? '#0E141C' : BLUE,
+              backgroundColor: canCreate ? BLUE : '#0C1118',
               borderWidth: 1,
-              borderColor: !selectedId ? LINE : 'rgba(76,201,255,0.45)',
-              opacity: creating ? 0.7 : 1,
+              borderColor: canCreate ? 'rgba(76,201,255,0.45)' : 'rgba(30,42,56,0.55)',
+              opacity: canCreate ? 1 : 0.35,
             }}
           >
-            <T style={{ color: !selectedId ? MUTED : '#001018', fontWeight: '900' }}>
+            <T style={{ color: canCreate ? '#001018' : 'rgba(143,163,184,0.55)', fontWeight: '900' }}>
               {creating ? '생성 중…' : selectedTitle ? `참여 코드 만들기 · ${selectedTitle}` : '참여 코드 만들기'}
             </T>
           </Pressable>
 
-          {!selectedId ? (
-            <T style={{ color: MUTED, marginTop: 10, fontSize: 12, lineHeight: 18 }}>
-              기록을 선택하면 버튼이 활성화됩니다.
+          {hasRoutines && !selectedId ? (
+            <T style={{ color: 'rgba(143,163,184,0.55)', marginTop: 10, fontSize: 12 }}>
+              호흡을 선택하면 버튼이 활성화됩니다.
             </T>
           ) : null}
         </Card>
 
         {/* 참여 코드 */}
-        <Card title="참여 코드" desc="상대방은 이 코드로 참여하실 수 있습니다.">
+        <Card title="참여 코드">
           {!createdRoom ? (
-            <T style={{ color: MUTED }}>아직 코드가 없습니다. 위에서 ‘참여 코드 만들기’를 눌러주세요.</T>
+            <T style={{ color: MUTED }}>아직 코드가 없습니다.</T>
           ) : (
             <View style={{ gap: 10 }}>
-              <View
-                style={{
-                  backgroundColor: '#0F151D',
-                  borderWidth: 1,
-                  borderColor: LINE,
-                  borderRadius: 16,
-                  padding: 12,
-                }}
-              >
-                <T style={{ color: TEXT, fontWeight: '900', fontSize: 22, letterSpacing: 1 }}>
-                  {createdRoom.join_code}
-                </T>
-                <T style={{ color: MUTED, marginTop: 6, fontSize: 12, fontWeight: '900' }}>
-                  코드가 동일하면 같은 공유 기록에 참여합니다.
-                </T>
-              </View>
+              <T style={{ color: TEXT, fontWeight: '900', fontSize: 22 }}>{createdRoom.join_code}</T>
 
               <View style={{ flexDirection: 'row', gap: 10 }}>
                 <Pressable
@@ -306,6 +295,7 @@ export default function ShareRoutineCreateScreen() {
                 >
                   <T style={{ color: MUTED, fontWeight: '900' }}>코드 복사</T>
                 </Pressable>
+
                 <Pressable
                   onPress={shareNow}
                   style={{

@@ -1,16 +1,24 @@
 // app/page.tsx
+import Image from "next/image";
+
 export default function HomePage() {
-  const supportEmail = 'breath.app@gmail.com';
-  // 배포 후 App Store 링크 생기면 여기에 교체하면 됨.
-  const downloadHref = '#'; // 예: 'https://apps.apple.com/app/idXXXXXXXXX'
-  const testflightHref = '#'; // 예: TestFlight 초대 링크
+  const supportEmail = 'zxcvbnm89432@gmail.com';
+  const downloadHref = '#';
+  const testflightHref = '#';
 
   return (
     <>
       <header className="nav">
         <div className="container navInner">
           <div className="brand">
-            <div className="logo" aria-hidden />
+          <Image
+            src="/logo.png"
+            alt="BREATH logo"
+            width={38}
+            height={38}
+            priority
+            style={{ borderRadius: 12 }}
+          />
             <div className="brandText">
               <div className="title">BREATH</div>
               <div className="sub">강박 없이, 계속을 위한 기록</div>
@@ -22,8 +30,7 @@ export default function HomePage() {
             <a className="pill" href="/terms">서비스 이용약관</a>
             <a className="pill" href="/support">지원</a>
             <a className="primaryBtn" href={testflightHref} aria-label="TestFlight">
-              테스트(TestFlight)
-              <span style={{ opacity: 0.7 }}>↗</span>
+              테스트(TestFlight) <span style={{ opacity: 0.7 }}>↗</span>
             </a>
           </nav>
         </div>
@@ -59,8 +66,7 @@ export default function HomePage() {
 
               <div className="ctaRow">
                 <a className="primaryBtn" href={downloadHref}>
-                  다운로드
-                  <span style={{ opacity: 0.7 }}>↗</span>
+                  다운로드 <span style={{ opacity: 0.7 }}>↗</span>
                 </a>
                 <a className="pill" href="/support">문의하기</a>
                 <a className="pill" href="/privacy">개인정보</a>
@@ -123,7 +129,11 @@ export default function HomePage() {
                   <div className="faqQ">Q. 어떤 정보를 수집하나요?</div>
                   <div className="faqA">
                     A. 로그인/계정 식별을 위한 이메일과, 사용자가 입력한 기록 데이터만 처리합니다.
-                    자세한 내용은 <a href="/privacy" style={{ textDecoration: 'underline', opacity: 0.9 }}>개인정보처리방침</a>을 참고해주세요.
+                    자세한 내용은{' '}
+                    <a href="/privacy" style={{ textDecoration: 'underline', opacity: 0.9 }}>
+                      개인정보처리방침
+                    </a>
+                    을 참고해주세요.
                   </div>
                 </div>
 

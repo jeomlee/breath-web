@@ -1,32 +1,33 @@
 // src/screens/DashboardScreen.tsx
-import React, { useCallback, useEffect, useMemo, useRef, useState, memo } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text as RNText,
   Pressable,
   Alert,
-  DeviceEventEmitter,
   RefreshControl,
   type TextProps,
   FlatList,
   type ListRenderItem,
   Platform,
+  TextInput,
+  KeyboardAvoidingView,
+  Switch,
+  StyleSheet,
+  DeviceEventEmitter,
+  type EmitterSubscription,
 } from 'react-native';
 import dayjs from 'dayjs';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Notifications from 'expo-notifications';
+import Constants from 'expo-constants';
+import { Ionicons } from '@expo/vector-icons';
 
 import { supabase } from '../api/supabaseClient';
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import type { DashboardStackParamList } from '../AppNavigator';
+import type { DashboardStackParamList } from '../navigation/types';
 import ScreenContainer from '../components/ScreenContainer';
-import {
-  fetchDailyLogs,
-  upsertDailyLog,
-  deleteDailyLog,
-  type DailyLogRow,
-  type DailyStatus,
-} from '../api/dailyLogs';
+import { fetchDailyLogs, upsertDailyLog, deleteDailyLog, type DailyLogRow, type DailyStatus } from '../api/dailyLogs';
 
 /** ✅ 시스템 글씨 크기 영향 차단용 Text 래퍼 */
 function T(props: TextProps) {
@@ -48,12 +49,6 @@ const COLORS = {
 
   NONE: '#6B7F96',
   NONE_BG: 'rgba(107,127,150,0.16)',
-
-  // ✅ confirm lock chip colors
-  LOCK_ON_BG: 'rgba(76,201,255,0.14)',
-  LOCK_ON_BD: 'rgba(76,201,255,0.45)',
-  LOCK_OFF_BG: '#0E141C',
-  LOCK_OFF_BD: '#1E2A38',
 };
 
 type Routine = {
@@ -64,223 +59,798 @@ type Routine = {
   group_key: string | null;
 };
 
-export const SETTINGS_CHANGED_EVENT = 'settingsChanged';
+type MoodValue = 1 | 2 | 3 | 4 | 5;
 
-type InsightsSettings = {
-  color_mode: 'log' | 'session_ratio';
+const MOODS: Array<{
+  v: MoodValue;
+  emoji: string;
+  label: string;
+  sub: string;
+  bg: string;
+  bd: string;
+  tx: string;
+}> = [
+  { v: 1, emoji: '😞', label: '너무 힘듦', sub: '버티는 중', bg: 'rgba(255,99,132,0.14)', bd: 'rgba(255,99,132,0.28)', tx: '#FF7AA2' },
+  { v: 2, emoji: '😕', label: '힘듦', sub: '좀 무거움', bg: 'rgba(255,159,64,0.12)', bd: 'rgba(255,159,64,0.24)', tx: '#FFB37A' },
+  { v: 3, emoji: '😐', label: '그저 그럼', sub: '무난함', bg: 'rgba(255,206,86,0.10)', bd: 'rgba(255,206,86,0.22)', tx: '#FFD88A' },
+  { v: 4, emoji: '🙂', label: '괜찮음', sub: '숨이 트임', bg: 'rgba(75,192,192,0.10)', bd: 'rgba(75,192,192,0.22)', tx: '#76E7D6' },
+  { v: 5, emoji: '😊', label: '좋음', sub: '가벼움', bg: 'rgba(76,201,255,0.12)', bd: 'rgba(76,201,255,0.24)', tx: COLORS.DONE },
+];
+
+// ✅ 알림 설정(매일)
+type ReminderSetting = {
+  is_enabled: boolean;
+  message: string;
+  updated_at?: string | null;
 };
 
-function clamp(n: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, n));
+function getProjectIdSafe() {
+  return (
+    (Constants as any)?.expoConfig?.extra?.eas?.projectId ||
+    (Constants as any)?.easConfig?.projectId ||
+    (Constants as any)?.expoConfig?.extra?.projectId ||
+    undefined
+  );
 }
 
-const StatBox = memo(function StatBox({
-  label,
-  percent,
-  count,
-  color,
+const DAILY_HOUR = 21; // ✅ 매일 21:00
+const DAILY_MINUTE = 0;
+const ANDROID_CHANNEL_ID = 'default';
+
+// ─────────────────────────────────────────────────────────────
+// ✅ 루틴 row (memo)
+// ─────────────────────────────────────────────────────────────
+const RoutineRow = React.memo(function RoutineRow({
+  routineId,
+  title,
+  status,
+  saving,
+  onOpenDetail,
+  onDone,
+  onRest,
+  onClear,
 }: {
-  label: string;
-  percent: number;
-  count: number;
-  color: string;
+  routineId: string;
+  title: string;
+  status: DailyStatus | undefined;
+  saving: boolean;
+  onOpenDetail: (routineId: string, title: string) => void;
+  onDone: (routineId: string) => void;
+  onRest: (routineId: string) => void;
+  onClear: (routineId: string) => void;
 }) {
+  const doneActive = status === 'done';
+  const restActive = status === 'rest';
+  const hasAny = !!status;
+
   return (
-    <View
-      style={{
-        flex: 1,
-        backgroundColor: '#0E141C',
-        borderRadius: 14,
-        padding: 12,
-        borderWidth: 1,
-        borderColor: COLORS.LINE,
-      }}
+    <Pressable
+      onPress={() => onOpenDetail(routineId, title)}
+      disabled={saving}
+      style={[S.rowCard, saving && S.btnDisabled]}
+      android_ripple={{ color: 'rgba(255,255,255,0.06)' }}
     >
-      <T style={{ color: COLORS.MUTED, fontWeight: '900', fontSize: 12 }}>{label}</T>
-      <T style={{ color, fontWeight: '900', fontSize: 20, marginTop: 6 }}>{percent}%</T>
-      <T style={{ color: COLORS.MUTED, marginTop: 4, fontWeight: '900' }}>{count}개</T>
+      <View style={S.chevWrap} pointerEvents="none">
+        <Ionicons name="chevron-forward" size={18} color="rgba(143,163,184,0.8)" />
+      </View>
+
+      <T style={S.rowTitle} numberOfLines={1}>
+        {title}
+      </T>
+
+      <View style={S.rowBtns}>
+        <Pressable
+          onPress={() => onDone(routineId)}
+          disabled={saving}
+          style={[S.btn, doneActive ? S.btnDoneActive : S.btnInactive, saving && S.btnDisabled]}
+        >
+          <T style={[S.btnText, doneActive ? S.txDone : S.txMuted]}>완료</T>
+        </Pressable>
+
+        <Pressable
+          onPress={() => onClear(routineId)}
+          disabled={saving}
+          style={[S.btnMid, hasAny ? S.btnMidActive : S.btnMidInactive, saving && S.btnDisabled]}
+        >
+          <T style={[S.btnText, S.txMuted]}>미체크</T>
+        </Pressable>
+
+        <Pressable
+          onPress={() => onRest(routineId)}
+          disabled={saving}
+          style={[S.btn, restActive ? S.btnRestActive : S.btnInactive, saving && S.btnDisabled]}
+        >
+          <T style={[S.btnText, restActive ? S.txRest : S.txMuted]}>휴식</T>
+        </Pressable>
+      </View>
+    </Pressable>
+  );
+}, (prev, next) => {
+  return (
+    prev.routineId === next.routineId &&
+    prev.title === next.title &&
+    prev.status === next.status &&
+    prev.saving === next.saving
+  );
+});
+
+// ─────────────────────────────────────────────────────────────
+// ✅ Header (memo)
+// ─────────────────────────────────────────────────────────────
+const HeaderBlock = React.memo(function HeaderBlock({
+  todayText,
+  loading,
+  todayMood,
+  moodSaving,
+  onMoodPick,
+  onMoodClear,
+  onGoCreate,
+  allRest,
+  disableRestAll,
+  onToggleRestAll,
+  routinesEmpty,
+}: {
+  todayText: string;
+  loading: boolean;
+  todayMood: MoodValue | null;
+  moodSaving: boolean;
+  onMoodPick: (v: MoodValue) => void;
+  onMoodClear: () => void;
+  onGoCreate: () => void;
+  allRest: boolean;
+  disableRestAll: boolean;
+  onToggleRestAll: () => void;
+  routinesEmpty: boolean;
+}) {
+  const moodMeta = todayMood ? MOODS.find((m) => m.v === todayMood) : null;
+
+  return (
+    <View style={S.headerWrap}>
+      <T style={S.h1}>오늘의 호흡은 어땠나요</T>
+      <T style={S.sub}>
+        {todayText}
+        {loading ? ' · 불러오는 중입니다…' : ''}
+      </T>
+
+      <View style={S.noticeCard}>
+        <T style={S.noticeText}>
+          <T style={S.noticeStrong}>오늘도 여기까지 오셨네요.</T>
+          {'\n'}
+          한 걸음이든, 쉬어 가는 날이든 괜찮습니다.
+        </T>
+      </View>
+
+      <View style={S.moodCard}>
+        <View style={S.moodTopRow}>
+          <View style={{ flex: 1, paddingRight: 8 }}>
+            <T style={S.cardTitle}>오늘의 기분</T>
+            <T style={S.cardDesc}>상태를 남겨보세요</T>
+          </View>
+
+          {todayMood ? (
+            <Pressable
+              onPress={onMoodClear}
+              disabled={moodSaving}
+              hitSlop={10}
+              style={[S.smallBtn, moodSaving && S.btnDisabled]}
+            >
+              <T style={S.smallBtnTx}>초기화</T>
+            </Pressable>
+          ) : null}
+        </View>
+
+        <View style={S.moodBtnsRow}>
+          {MOODS.map((m) => {
+            const active = todayMood === m.v;
+            return (
+              <Pressable
+                key={m.v}
+                onPress={() => onMoodPick(m.v)}
+                disabled={moodSaving}
+                style={[
+                  S.moodBtn,
+                  {
+                    backgroundColor: active ? m.bg : '#0E141C',
+                    borderColor: active ? m.bd : COLORS.LINE,
+                    opacity: moodSaving ? 0.7 : 1,
+                  },
+                ]}
+              >
+                <T style={{ color: active ? m.tx : COLORS.MUTED, fontWeight: '900', fontSize: 18 }}>{m.emoji}</T>
+              </Pressable>
+            );
+          })}
+        </View>
+
+        <View style={S.moodMetaBox}>
+          {!moodMeta ? (
+            <T style={S.moodMetaText}>아직 선택하지 않았습니다.</T>
+          ) : (
+            <T style={S.moodMetaText}>
+              <T style={{ color: moodMeta.tx, fontWeight: '900' }}>
+                {moodMeta.emoji} {moodMeta.label}
+              </T>{' '}
+              ({moodMeta.sub})
+            </T>
+          )}
+        </View>
+      </View>
+
+      <View style={S.sectionRow}>
+        <T style={S.sectionTitle}>오늘의 호흡</T>
+
+        <Pressable onPress={onGoCreate} style={S.addBtn}>
+          <T style={S.addBtnTx}>호흡 추가</T>
+        </Pressable>
+      </View>
+
+      <Pressable
+        onPress={onToggleRestAll}
+        disabled={disableRestAll}
+        style={[
+          S.restAllBtn,
+          {
+            backgroundColor: allRest ? 'rgba(107,127,150,0.12)' : COLORS.REST_BG,
+            borderColor: allRest ? 'rgba(107,127,150,0.28)' : 'rgba(59,231,176,0.28)',
+            opacity: disableRestAll ? 0.6 : 1,
+          },
+        ]}
+      >
+        <T style={{ color: allRest ? COLORS.MUTED : COLORS.REST, fontWeight: '900' }}>
+          {allRest ? '휴식 해제 (전체 미체크)' : '오늘은 쉽니다 (전체 휴식)'}
+        </T>
+      </Pressable>
+
+      {routinesEmpty ? (
+        <View style={S.emptyCard}>
+          <T style={{ color: COLORS.MUTED }}>아직 활성화된 기록이 없습니다.</T>
+        </View>
+      ) : null}
     </View>
   );
 });
 
-/** ✅ +a: 확인 잠금(대시보드) */
-const CONFIRM_LOCK_KEY = 'breath_confirm_lock_enabled_v1';
+// ─────────────────────────────────────────────────────────────
+// ✅ Footer (memo)
+// ─────────────────────────────────────────────────────────────
+const FooterBlock = React.memo(function FooterBlock({
+  reminder,
+  reminderSaving,
+  timeText,
+  onToggle,
+  onChangeMessage,
+  onTest,
+}: {
+  reminder: ReminderSetting;
+  reminderSaving: boolean;
+  timeText: string;
+  onToggle: (v: boolean) => void;
+  onChangeMessage: (t: string) => void;
+  onTest: () => void;
+}) {
+  const dim = reminder.is_enabled ? 1 : 0.55;
+  const cardEnabled = reminder.is_enabled && !reminderSaving;
+
+  return (
+    <KeyboardAvoidingView
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 80 : 0}
+    >
+      <View style={S.footerPad}>
+        <View style={S.reminderCard}>
+          <View style={S.reminderTop}>
+            <T style={S.cardTitle}>알림설정</T>
+
+            <View style={S.switchRow}>
+              <T style={{ color: reminder.is_enabled ? COLORS.DONE : COLORS.MUTED, fontWeight: '900', fontSize: 12 }}>
+                {reminder.is_enabled ? '켜짐' : '꺼짐'}
+              </T>
+              <Switch
+                value={reminder.is_enabled}
+                onValueChange={onToggle}
+                disabled={reminderSaving}
+                trackColor={{ false: 'rgba(107,127,150,0.28)', true: 'rgba(76,201,255,0.35)' }}
+                thumbColor={reminder.is_enabled ? COLORS.DONE : '#A9B7C8'}
+              />
+            </View>
+          </View>
+
+          <View style={{ marginTop: 10 }}>
+            <T
+              style={{
+                color: reminder.is_enabled ? COLORS.MUTED : 'rgba(143,163,184,0.0)',
+                fontSize: 12,
+                lineHeight: 18,
+              }}
+            >
+              {reminder.is_enabled ? (
+                <>
+                  매일 <T style={{ color: COLORS.TEXT, fontWeight: '900' }}>{timeText}</T>에 입력한 문구로 알림이 옵니다.
+                </>
+              ) : (
+                ' '
+              )}
+            </T>
+          </View>
+
+          <View style={{ marginTop: 12, opacity: dim }}>
+            <TextInput
+              value={reminder.message}
+              onChangeText={onChangeMessage}
+              placeholder={reminder.is_enabled ? '알림 문구를 입력하세요' : '알림을 켜면 문구를 입력할 수 있어요'}
+              placeholderTextColor="rgba(143,163,184,0.55)"
+              multiline
+              editable={reminder.is_enabled && !reminderSaving}
+              style={S.reminderInput}
+            />
+          </View>
+
+          <View style={{ flexDirection: 'row', gap: 10, marginTop: 12, opacity: dim }}>
+            <Pressable
+              onPress={onTest}
+              disabled={!cardEnabled}
+              style={[
+                S.testBtn,
+                {
+                  backgroundColor: reminder.is_enabled ? 'rgba(107,127,150,0.10)' : 'rgba(107,127,150,0.06)',
+                  borderColor: reminder.is_enabled ? 'rgba(107,127,150,0.24)' : 'rgba(30,42,56,0.8)',
+                  opacity: !cardEnabled ? 0.55 : 1,
+                },
+              ]}
+            >
+              <T style={{ color: COLORS.MUTED, fontWeight: '900' }}>알림 테스트</T>
+            </Pressable>
+          </View>
+
+          <View style={[S.reminderHint, { opacity: dim }]}>
+            <T style={S.reminderHintTx}>{reminder.is_enabled ? <>알림이 켜져 있습니다.</> : <>알림이 꺼져 있습니다.</>}</T>
+          </View>
+        </View>
+      </View>
+
+      <View style={{ height: 120 }} />
+    </KeyboardAvoidingView>
+  );
+});
 
 export default function DashboardScreen() {
   const nav = useNavigation<NativeStackNavigationProp<DashboardStackParamList>>();
 
-  const [userId, setUserId] = useState('');
-  const userIdRef = useRef<string>('');
-
   const [routines, setRoutines] = useState<Routine[]>([]);
   const [todayLogs, setTodayLogs] = useState<DailyLogRow[]>([]);
   const [loading, setLoading] = useState(false);
-
   const [refreshing, setRefreshing] = useState(false);
 
-  const [insightsSettings, setInsightsSettings] = useState<InsightsSettings>({
-    color_mode: 'log',
-  });
+  // ✅ mood
+  const [todayMood, setTodayMoodState] = useState<MoodValue | null>(null);
+  const [moodSaving, setMoodSaving] = useState(false);
 
-  // ✅ 확인 잠금
-  const [confirmLock, setConfirmLock] = useState(false);
-  const confirmBootedRef = useRef(false);
+  // ✅ reminder
+  const [reminder, setReminder] = useState<ReminderSetting>({ is_enabled: false, message: '' });
+  const [reminderSaving, setReminderSaving] = useState(false);
 
-  const [focusSeconds, setFocusSeconds] = useState(0);
-  const [restSeconds, setRestSeconds] = useState(0);
-
-  const todayKey = useMemo(() => dayjs().format('YYYY-MM-DD'), []);
-  const startOfDayISO = useMemo(() => dayjs().startOf('day').toISOString(), []);
-  const endOfDayISO = useMemo(() => dayjs().startOf('day').add(1, 'day').toISOString(), []);
-
+  const userIdRef = useRef<string>('');
   const savingRef = useRef<Record<string, boolean>>({});
   const bulkRef = useRef(false);
 
-  const loadConfirmLock = useCallback(async () => {
+  // ✅ 알림 동기화 가드
+  const reminderSyncedRef = useRef<{
+    uid: string;
+    updated_at?: string | null;
+    enabled: boolean;
+    msg: string;
+  } | null>(null);
+
+  const todayKey = useMemo(() => dayjs().format('YYYY-MM-DD'), []);
+  const todayText = useMemo(() => dayjs().format('M/D ddd'), []);
+  const timeText = useMemo(
+    () => `${String(DAILY_HOUR).padStart(2, '0')}:${String(DAILY_MINUTE).padStart(2, '0')}`,
+    []
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // ✅ 알림 핸들러/채널 (1회)
+  // ─────────────────────────────────────────────────────────────
+  useEffect(() => {
+    Notifications.setNotificationHandler({
+      handleNotification: async () => ({
+        shouldShowAlert: true,
+        shouldPlaySound: true,
+        shouldShowBanner: true,
+        shouldShowList: true,
+        shouldSetBadge: false,
+      }),
+    });
+
+    (async () => {
+      if (Platform.OS === 'android') {
+        try {
+          await Notifications.setNotificationChannelAsync(ANDROID_CHANNEL_ID, {
+            name: 'Default',
+            importance: Notifications.AndroidImportance.HIGH,
+            vibrationPattern: [0, 250, 250, 250],
+            lightColor: '#4CC9FF',
+          });
+        } catch {}
+      }
+    })();
+  }, []);
+
+  const ensurePushToken = useCallback(async (uid: string): Promise<string | null> => {
     try {
-      const v = await AsyncStorage.getItem(CONFIRM_LOCK_KEY);
-      setConfirmLock(v === '1');
+      const current = await Notifications.getPermissionsAsync();
+      let status = current.status;
+      if (status !== 'granted') {
+        const req = await Notifications.requestPermissionsAsync();
+        status = req.status;
+      }
+      if (status !== 'granted') return null;
+
+      const projectId = getProjectIdSafe();
+
+      let token: string | null = null;
+      try {
+        const tokenRes = await Notifications.getExpoPushTokenAsync(projectId ? { projectId } : undefined);
+        token = tokenRes.data;
+      } catch {
+        token = null;
+      }
+
+      if (token) {
+        await supabase.from('profiles').upsert(
+          { user_id: uid, expo_push_token: token, updated_at: new Date().toISOString() } as any,
+          { onConflict: 'user_id' }
+        );
+      }
+
+      return token;
     } catch {
-      setConfirmLock(false);
+      return null;
     }
   }, []);
 
-  // ✅ 세그먼트 버튼용 setter (ON/OFF 확실)
-  const setConfirmLockMode = useCallback(
-    async (next: boolean) => {
-      if (next === confirmLock) return;
-      setConfirmLock(next);
-      try {
-        await AsyncStorage.setItem(CONFIRM_LOCK_KEY, next ? '1' : '0');
-      } catch {
-        // ignore
-      }
-      Alert.alert('확인 잠금', next ? 'ON (숫자/비율 숨김 · 새로고침 제한)' : 'OFF');
+  const cancelDailyNotifications = useCallback(async () => {
+    try {
+      await Notifications.cancelAllScheduledNotificationsAsync();
+    } catch {}
+  }, []);
+
+  const scheduleDailyNotification = useCallback(
+    async (message: string) => {
+      await cancelDailyNotifications();
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: '브리드',
+          body: message,
+          sound: true,
+          ...(Platform.OS === 'android' ? { channelId: ANDROID_CHANNEL_ID } : {}),
+        },
+        trigger: {
+          type: Notifications.SchedulableTriggerInputTypes.DAILY,
+          hour: DAILY_HOUR,
+          minute: DAILY_MINUTE,
+        },
+      });
     },
-    [confirmLock]
+    [cancelDailyNotifications]
   );
 
-  const loadSettings = useCallback(async (uid: string) => {
+  const syncLocalReminderSchedule = useCallback(
+    async (uid: string, setting: ReminderSetting) => {
+      const msg = (setting.message ?? '').trim();
+      const key = {
+        uid,
+        updated_at: setting.updated_at ?? null,
+        enabled: !!setting.is_enabled,
+        msg,
+      };
+      const last = reminderSyncedRef.current;
+
+      if (last && last.uid === key.uid && last.updated_at === key.updated_at && last.enabled === key.enabled && last.msg === key.msg) {
+        return;
+      }
+
+      try {
+        if (!setting.is_enabled || !msg) await cancelDailyNotifications();
+        else await scheduleDailyNotification(msg);
+      } finally {
+        reminderSyncedRef.current = key;
+      }
+    },
+    [cancelDailyNotifications, scheduleDailyNotification]
+  );
+
+  const sendTestNotification = useCallback(async (message: string) => {
+    await Notifications.scheduleNotificationAsync({
+      content: {
+        title: '브리드 (테스트)',
+        body: message || '테스트 알림입니다.',
+        sound: true,
+        ...(Platform.OS === 'android' ? { channelId: ANDROID_CHANNEL_ID } : {}),
+      },
+      trigger: { type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL, seconds: 2, repeats: false },
+    });
+  }, []);
+
+  const loadReminder = useCallback(async (uid: string): Promise<ReminderSetting> => {
     try {
       const { data, error } = await supabase
-        .from('user_settings')
-        .select('insights_color_mode')
+        .from('reminder_settings')
+        .select('is_enabled,message,updated_at')
         .eq('user_id', uid)
         .maybeSingle();
 
-      if (error) return;
-
-      const mode = data?.insights_color_mode as InsightsSettings['color_mode'] | undefined;
-      if (mode === 'log' || mode === 'session_ratio') {
-        setInsightsSettings({ color_mode: mode });
+      if (error) {
+        const fallback = { is_enabled: false, message: '' };
+        setReminder(fallback);
+        return fallback;
       }
+
+      const next: ReminderSetting = {
+        is_enabled: !!data?.is_enabled,
+        message: (data?.message ?? '') as string,
+        updated_at: (data?.updated_at ?? null) as any,
+      };
+      setReminder(next);
+      return next;
     } catch {
-      // ignore
+      const fallback = { is_enabled: false, message: '' };
+      setReminder(fallback);
+      return fallback;
     }
   }, []);
 
-  const saveSettings = useCallback(
-    async (patch: Partial<InsightsSettings>) => {
-      if (!userIdRef.current) return;
+  const persistReminder = useCallback(async (next: ReminderSetting) => {
+    const uid = userIdRef.current;
+    if (!uid) return null;
 
-      const next: InsightsSettings = { ...insightsSettings, ...patch };
-      setInsightsSettings(next);
+    const msg = (next.message ?? '').trim();
+    if (next.is_enabled && !msg) throw new Error('empty_message');
 
+    const updatedAt = new Date().toISOString();
+
+    const { error } = await supabase.from('reminder_settings').upsert(
+      { user_id: uid, is_enabled: next.is_enabled, message: next.message ?? '', updated_at: updatedAt } as any,
+      { onConflict: 'user_id' }
+    );
+    if (error) throw error;
+
+    const updated: ReminderSetting = { is_enabled: next.is_enabled, message: next.message ?? '', updated_at: updatedAt };
+    setReminder(updated);
+    return updated;
+  }, []);
+
+  const toggleReminder = useCallback(
+    async (enable: boolean) => {
+      const uid = userIdRef.current;
+      if (!uid || reminderSaving) return;
+
+      const msg = reminder.message.trim();
+
+      setReminderSaving(true);
       try {
-        const payload = {
-          user_id: userIdRef.current,
-          insights_color_mode: next.color_mode,
-          updated_at: new Date().toISOString(),
-        };
-
-        const { error } = await supabase.from('user_settings').upsert(payload as any, {
-          onConflict: 'user_id',
-        });
-
-        if (error) {
-          Alert.alert('설정 저장 실패', error.message);
+        const current = await Notifications.getPermissionsAsync();
+        let status = current.status;
+        if (status !== 'granted') {
+          const req = await Notifications.requestPermissionsAsync();
+          status = req.status;
+        }
+        if (status !== 'granted') {
+          Alert.alert('알림 권한이 필요합니다', '설정에서 알림 권한을 허용해 주세요.');
+          setReminder((p) => ({ ...p, is_enabled: false }));
           return;
         }
 
-        DeviceEventEmitter.emit(SETTINGS_CHANGED_EVENT, next);
-      } catch (e: any) {
-        Alert.alert('설정 저장 실패', e?.message ?? '알 수 없는 오류가 발생했습니다.');
-      }
-    },
-    [insightsSettings]
-  );
-
-  const load = useCallback(
-    async (opts?: { silent?: boolean }) => {
-      const silent = !!opts?.silent;
-      if (!silent) setLoading(true);
-
-      try {
-        let uid = userIdRef.current;
-        if (!uid) {
-          const user = (await supabase.auth.getUser()).data.user;
-          if (!user) return;
-          uid = user.id;
-          userIdRef.current = uid;
-          setUserId(uid);
+        if (enable && !msg) {
+          Alert.alert('문구가 비어 있어요', '알림 문구를 입력한 뒤 켜 주세요.');
+          setReminder((p) => ({ ...p, is_enabled: false }));
+          return;
         }
 
-        const routinesPromise = supabase
-          .from('routines')
-          .select('id,title,sort_order,is_active,group_key')
-          .eq('user_id', uid)
-          .eq('is_active', true)
-          .order('sort_order', { ascending: true });
+        ensurePushToken(uid).catch(() => null);
 
-        const logsPromise = fetchDailyLogs({ userId: uid, dateKey: todayKey });
-
-        const settingsPromise = loadSettings(uid);
-
-        const sumPromise = supabase.rpc('get_focus_rest_sum', {
-          p_user_id: uid,
-          p_start: startOfDayISO,
-          p_end: endOfDayISO,
-        });
-
-        const [rRes, logs, sumRes] = await Promise.all([routinesPromise, logsPromise, settingsPromise, sumPromise]).then(
-          (arr) => [arr[0] as any, arr[1] as any, arr[3] as any]
-        );
-
-        if (rRes.error) Alert.alert('기록 불러오기 실패', rRes.error.message);
-        setRoutines((rRes.data as any) || []);
-        setTodayLogs((logs as any) || []);
-
-        if (sumRes?.error) {
-          setFocusSeconds(0);
-          setRestSeconds(0);
+        if (enable) {
+          await scheduleDailyNotification(msg);
+          const updated = await persistReminder({ is_enabled: true, message: reminder.message });
+          if (updated) await syncLocalReminderSchedule(uid, updated);
         } else {
-          const row = Array.isArray(sumRes.data) ? sumRes.data[0] : sumRes.data;
-          setFocusSeconds(Number(row?.focus_seconds ?? 0));
-          setRestSeconds(Number(row?.rest_seconds ?? 0));
+          await cancelDailyNotifications();
+          const updated = await persistReminder({ is_enabled: false, message: reminder.message });
+          if (updated) await syncLocalReminderSchedule(uid, updated);
         }
       } catch (e: any) {
-        Alert.alert('데이터 불러오기 실패', e?.message ?? '알 수 없는 오류가 발생했습니다.');
+        if (e?.message === 'empty_message') {
+          Alert.alert('문구가 비어 있어요', '알림 문구를 입력해 주세요.');
+        } else {
+          Alert.alert('알림 처리 실패', e?.message ?? '알 수 없는 오류가 발생했습니다.');
+        }
+        const fresh = await loadReminder(uid);
+        await syncLocalReminderSchedule(uid, fresh);
       } finally {
-        if (!silent) setLoading(false);
+        setReminderSaving(false);
       }
     },
-    [endOfDayISO, loadSettings, startOfDayISO, todayKey]
+    [cancelDailyNotifications, ensurePushToken, loadReminder, persistReminder, reminder.message, reminderSaving, scheduleDailyNotification, syncLocalReminderSchedule]
   );
 
-  useEffect(() => {
-    (async () => {
-      if (confirmBootedRef.current) return;
-      confirmBootedRef.current = true;
-      await loadConfirmLock();
-    })();
-  }, [loadConfirmLock]);
+  const runTest = useCallback(async () => {
+    const uid = userIdRef.current;
+    if (!uid || reminderSaving) return;
+
+    const msg = reminder.message.trim();
+    if (!msg) {
+      Alert.alert('문구가 비어 있어요', '테스트할 문구를 먼저 입력해 주세요.');
+      return;
+    }
+
+    setReminderSaving(true);
+    try {
+      const current = await Notifications.getPermissionsAsync();
+      let status = current.status;
+      if (status !== 'granted') {
+        const req = await Notifications.requestPermissionsAsync();
+        status = req.status;
+      }
+      if (status !== 'granted') {
+        Alert.alert('알림 권한이 필요합니다', '설정에서 알림 권한을 허용해 주세요.');
+        return;
+      }
+      await sendTestNotification(msg);
+    } catch (e: any) {
+      Alert.alert('테스트 실패', e?.message ?? '알 수 없는 오류가 발생했습니다.');
+    } finally {
+      setReminderSaving(false);
+    }
+  }, [reminder.message, reminderSaving, sendTestNotification]);
+
+  const loadTodayMood = useCallback(async (uid: string) => {
+    try {
+      const { data, error } = await supabase.from('mood_logs').select('mood').eq('user_id', uid).eq('date_key', todayKey).maybeSingle();
+      if (error) {
+        setTodayMoodState(null);
+        return;
+      }
+      const v = data?.mood;
+      if (v === 1 || v === 2 || v === 3 || v === 4 || v === 5) setTodayMoodState(v);
+      else setTodayMoodState(null);
+    } catch {
+      setTodayMoodState(null);
+    }
+  }, [todayKey]);
+
+  const setTodayMood = useCallback(async (v: MoodValue) => {
+    const uid = userIdRef.current;
+    if (!uid || moodSaving) return;
+
+    setMoodSaving(true);
+    setTodayMoodState(v);
+
+    try {
+      const payload = { user_id: uid, date_key: todayKey, mood: v, updated_at: new Date().toISOString() };
+      const { error } = await supabase.from('mood_logs').upsert(payload as any, { onConflict: 'user_id,date_key' });
+      if (error) {
+        Alert.alert('기분 저장 실패', error.message);
+        await loadTodayMood(uid);
+      }
+    } catch (e: any) {
+      Alert.alert('기분 저장 실패', e?.message ?? '알 수 없는 오류가 발생했습니다.');
+      await loadTodayMood(uid);
+    } finally {
+      setMoodSaving(false);
+    }
+  }, [loadTodayMood, moodSaving, todayKey]);
+
+  const clearTodayMood = useCallback(async () => {
+    const uid = userIdRef.current;
+    if (!uid || moodSaving) return;
+
+    setMoodSaving(true);
+    setTodayMoodState(null);
+
+    try {
+      const { error } = await supabase.from('mood_logs').delete().eq('user_id', uid).eq('date_key', todayKey);
+      if (error) {
+        Alert.alert('기분 삭제 실패', error.message);
+        await loadTodayMood(uid);
+      }
+    } catch (e: any) {
+      Alert.alert('기분 삭제 실패', e?.message ?? '알 수 없는 오류가 발생했습니다.');
+      await loadTodayMood(uid);
+    } finally {
+      setMoodSaving(false);
+    }
+  }, [loadTodayMood, moodSaving, todayKey]);
+
+  // ─────────────────────────────────────────────────────────────
+  // ✅ load
+  // ─────────────────────────────────────────────────────────────
+  const load = useCallback(async (opts?: { silent?: boolean }) => {
+    const silent = !!opts?.silent;
+    if (!silent) setLoading(true);
+
+    try {
+      let uid = userIdRef.current;
+      if (!uid) {
+        const user = (await supabase.auth.getUser()).data.user;
+        if (!user) return;
+        uid = user.id;
+        userIdRef.current = uid;
+      }
+
+      const routinesPromise = supabase
+        .from('routines')
+        .select('id,title,sort_order,is_active,group_key')
+        .eq('user_id', uid)
+        .eq('is_active', true)
+        .order('sort_order', { ascending: true });
+
+      const logsPromise = fetchDailyLogs({ userId: uid, dateKey: todayKey });
+      const moodPromise = loadTodayMood(uid);
+      const reminderPromise = loadReminder(uid);
+
+      const [rRes, logs, reminderSetting] = await Promise.all([
+        routinesPromise,
+        logsPromise,
+        moodPromise,
+        reminderPromise,
+      ]).then((arr) => [arr[0] as any, arr[1] as any, arr[3] as any]);
+
+      syncLocalReminderSchedule(uid, reminderSetting as ReminderSetting).catch(() => null);
+
+      if (rRes.error) Alert.alert('기록 불러오기 실패', rRes.error.message);
+
+      setRoutines((rRes.data as any) || []);
+      setTodayLogs((logs as any) || []);
+    } catch (e: any) {
+      Alert.alert('데이터 불러오기 실패', e?.message ?? '알 수 없는 오류가 발생했습니다.');
+    } finally {
+      if (!silent) setLoading(false);
+    }
+  }, [loadReminder, loadTodayMood, todayKey, syncLocalReminderSchedule]);
 
   useEffect(() => {
     load();
   }, [load]);
 
+  // ✅✅✅ 이벤트 리스너는 반드시 load 정의 이후에!
+  useEffect(() => {
+    const subs: EmitterSubscription[] = [];
+
+    // ✅ 삭제 즉시 반영 + silent load
+    subs.push(
+      DeviceEventEmitter.addListener('ROUTINE_DELETED', (payload: { routineId: string }) => {
+        const rid = payload?.routineId;
+        if (!rid) return;
+
+        setRoutines((prev) => prev.filter((r) => r.id !== rid));
+        setTodayLogs((prev) => prev.filter((x) => x.routine_id !== rid));
+
+        load({ silent: true }).catch(() => null);
+      })
+    );
+
+    // ✅ 생성 이벤트(옵션: create 화면에서 emit하면 무거운 full refresh 줄일 수 있음)
+    subs.push(
+      DeviceEventEmitter.addListener('ROUTINE_CREATED', (created: Routine) => {
+        if (!created?.id) return;
+        setRoutines((prev) => {
+          const filtered = prev.filter((r) => r.id !== created.id);
+          return [...filtered, created].sort((a, b) => a.sort_order - b.sort_order);
+        });
+        load({ silent: true }).catch(() => null);
+      })
+    );
+
+    subs.push(
+      DeviceEventEmitter.addListener('ROUTINES_CHANGED', () => {
+        load({ silent: true }).catch(() => null);
+      })
+    );
+
+    return () => subs.forEach((s) => s.remove());
+  }, [load]);
+
   const onRefresh = useCallback(async () => {
-    if (confirmLock) return;
     if (refreshing) return;
     setRefreshing(true);
     try {
@@ -288,95 +858,86 @@ export default function DashboardScreen() {
     } finally {
       setRefreshing(false);
     }
-  }, [confirmLock, load, refreshing]);
+  }, [load, refreshing]);
 
+  // ✅ statusMap
   const statusMap = useMemo(() => {
     const m = new Map<string, DailyStatus>();
     for (const row of todayLogs) m.set(row.routine_id, row.status);
     return m;
   }, [todayLogs]);
 
-  const total = routines.length;
-
-  const doneCount = useMemo(() => routines.filter((r) => statusMap.get(r.id) === 'done').length, [routines, statusMap]);
-  const restCount = useMemo(() => routines.filter((r) => statusMap.get(r.id) === 'rest').length, [routines, statusMap]);
-  const noneCount = Math.max(0, total - doneCount - restCount);
-
-  const donePct = total === 0 ? 0 : Math.round((doneCount / total) * 100);
-  const restPct = total === 0 ? 0 : Math.round((restCount / total) * 100);
-  const nonePct = total === 0 ? 0 : Math.max(0, 100 - donePct - restPct);
-
-  const doneFlex = total === 0 ? 1 : clamp(doneCount / total, 0, 1);
-  const noneFlex = total === 0 ? 1 : clamp(noneCount / total, 0, 1);
-  const restFlex = total === 0 ? 1 : clamp(restCount / total, 0, 1);
-
-  const focusMin = Math.round(focusSeconds / 60);
-  const restMin = Math.round(restSeconds / 60);
-
   const allRest = useMemo(() => {
-    if (total === 0) return false;
+    if (routines.length === 0) return false;
     return routines.every((r) => statusMap.get(r.id) === 'rest');
-  }, [routines, statusMap, total]);
+  }, [routines, statusMap]);
 
-  const setStatus = useCallback(
-    async (routine: Routine, status: DailyStatus) => {
-      const uid = userIdRef.current;
-      if (!uid) return;
-      if (savingRef.current[routine.id]) return;
-      savingRef.current[routine.id] = true;
+  // ─────────────────────────────────────────────────────────────
+  // ✅ Dashboard → (Tabs) Insights → RoutineDetail
+  //  - params 갱신 안되는 케이스(탭 전환) 대비로 이벤트도 같이 쏴줌
+  // ─────────────────────────────────────────────────────────────
+  const openRoutineDetail = useCallback((routineId: string, title: string) => {
+    // 1) RoutineDetail이 이미 떠있어도 바뀌게(탭 상태 유지 케이스 대응)
+    DeviceEventEmitter.emit('OPEN_ROUTINE_DETAIL', { routineId, title });
 
-      const prev = todayLogs;
+    // 2) 탭 이동 + (가능하면) nested screen 지정
+    nav.getParent()?.navigate('Insights' as any, {
+      screen: 'RoutineDetail',
+      params: { routineId, title },
+      // merge: true를 완전히 보장하긴 어려워서 이벤트를 함께 사용
+      merge: true,
+    } as any);
+  }, [nav]);
 
-      setTodayLogs((p) => {
-        const next = p.filter((x) => x.routine_id !== routine.id);
-        next.push({ user_id: uid, date_key: todayKey, routine_id: routine.id, status } as any);
-        return next;
-      });
+  // ─────────────────────────────────────────────────────────────
+  // ✅ Status handlers
+  // ─────────────────────────────────────────────────────────────
+  const setStatusById = useCallback(async (routineId: string, status: DailyStatus) => {
+    const uid = userIdRef.current;
+    if (!uid) return;
+    if (savingRef.current[routineId]) return;
+    savingRef.current[routineId] = true;
 
-      try {
-        const saved = await upsertDailyLog({
-          userId: uid,
-          dateKey: todayKey,
-          routineId: routine.id,
-          status,
-        });
+    const prev = todayLogs;
+    setTodayLogs((p) => {
+      const next = p.filter((x) => x.routine_id !== routineId);
+      next.push({ user_id: uid, date_key: todayKey, routine_id: routineId, status } as any);
+      return next;
+    });
 
-        setTodayLogs((p) => p.filter((x) => x.routine_id !== routine.id).concat(saved));
-      } catch (e: any) {
-        setTodayLogs(prev);
-        Alert.alert('저장 실패', e?.message ?? '알 수 없는 오류가 발생했습니다.');
-      } finally {
-        savingRef.current[routine.id] = false;
-      }
-    },
-    [todayKey, todayLogs]
-  );
+    try {
+      const saved = await upsertDailyLog({ userId: uid, dateKey: todayKey, routineId, status });
+      setTodayLogs((p) => p.filter((x) => x.routine_id !== routineId).concat(saved));
+    } catch (e: any) {
+      setTodayLogs(prev);
+      Alert.alert('저장 실패', e?.message ?? '알 수 없는 오류가 발생했습니다.');
+    } finally {
+      savingRef.current[routineId] = false;
+    }
+  }, [todayKey, todayLogs]);
 
-  const clearStatus = useCallback(
-    async (routine: Routine) => {
-      const uid = userIdRef.current;
-      if (!uid) return;
-      if (savingRef.current[routine.id]) return;
-      savingRef.current[routine.id] = true;
+  const clearStatusById = useCallback(async (routineId: string) => {
+    const uid = userIdRef.current;
+    if (!uid) return;
+    if (savingRef.current[routineId]) return;
+    savingRef.current[routineId] = true;
 
-      const prev = todayLogs;
-      setTodayLogs((p) => p.filter((x) => x.routine_id !== routine.id));
+    const prev = todayLogs;
+    setTodayLogs((p) => p.filter((x) => x.routine_id !== routineId));
 
-      try {
-        await deleteDailyLog({
-          userId: uid,
-          dateKey: todayKey,
-          routineId: routine.id,
-        });
-      } catch (e: any) {
-        setTodayLogs(prev);
-        Alert.alert('저장 실패', e?.message ?? '알 수 없는 오류가 발생했습니다.');
-      } finally {
-        savingRef.current[routine.id] = false;
-      }
-    },
-    [todayKey, todayLogs]
-  );
+    try {
+      await deleteDailyLog({ userId: uid, dateKey: todayKey, routineId });
+    } catch (e: any) {
+      setTodayLogs(prev);
+      Alert.alert('저장 실패', e?.message ?? '알 수 없는 오류가 발생했습니다.');
+    } finally {
+      savingRef.current[routineId] = false;
+    }
+  }, [todayKey, todayLogs]);
+
+  const onDone = useCallback((routineId: string) => setStatusById(routineId, 'done'), [setStatusById]);
+  const onRest = useCallback((routineId: string) => setStatusById(routineId, 'rest'), [setStatusById]);
+  const onClear = useCallback((routineId: string) => clearStatusById(routineId), [clearStatusById]);
 
   const toggleRestAll = useCallback(async () => {
     const uid = userIdRef.current;
@@ -390,51 +951,26 @@ export default function DashboardScreen() {
       if (allRest) {
         const prev = todayLogs;
         setTodayLogs([]);
-
         try {
           await Promise.all(
-            routines.map((r) =>
-              deleteDailyLog({
-                userId: uid,
-                dateKey: todayKey,
-                routineId: r.id,
-              }).catch(() => null)
-            )
+            routines.map((r) => deleteDailyLog({ userId: uid, dateKey: todayKey, routineId: r.id }).catch(() => null))
           );
         } catch (e: any) {
           setTodayLogs(prev);
           Alert.alert('휴식 해제 실패', e?.message ?? '알 수 없는 오류가 발생했습니다.');
           return;
         }
-
         await load({ silent: true });
         return;
       }
 
       const prev = todayLogs;
       setTodayLogs(() =>
-        routines.map(
-          (r) =>
-            ({
-              user_id: uid,
-              date_key: todayKey,
-              routine_id: r.id,
-              status: 'rest',
-            }) as any
-        )
+        routines.map((r) => ({ user_id: uid, date_key: todayKey, routine_id: r.id, status: 'rest' }) as any)
       );
 
       try {
-        await Promise.all(
-          routines.map((r) =>
-            upsertDailyLog({
-              userId: uid,
-              dateKey: todayKey,
-              routineId: r.id,
-              status: 'rest',
-            })
-          )
-        );
+        await Promise.all(routines.map((r) => upsertDailyLog({ userId: uid, dateKey: todayKey, routineId: r.id, status: 'rest' })));
       } catch (e: any) {
         setTodayLogs(prev);
         Alert.alert('저장 실패', e?.message ?? '알 수 없는 오류가 발생했습니다.');
@@ -447,347 +983,55 @@ export default function DashboardScreen() {
     }
   }, [allRest, load, routines, todayKey, todayLogs]);
 
-  /** ✅ 균형 카드 우측상단: ON/OFF 세그먼트(직관) */
-  const ConfirmLockSegment = useMemo(() => {
+  // ✅ FlatList renderItem
+  const renderItem: ListRenderItem<Routine> = useCallback(({ item }) => {
+    const st = statusMap.get(item.id);
+    const saving = !!savingRef.current[item.id];
+
     return (
-      <View
-        style={{
-          flexDirection: 'row',
-          borderWidth: 1,
-          borderColor: confirmLock ? COLORS.LOCK_ON_BD : COLORS.LOCK_OFF_BD,
-          backgroundColor: COLORS.LOCK_OFF_BG,
-          borderRadius: 999,
-          overflow: 'hidden',
-        }}
-      >
-        <Pressable
-          onPress={() => setConfirmLockMode(false)}
-          hitSlop={8}
-          style={{
-            paddingVertical: 6,
-            paddingHorizontal: 10,
-            backgroundColor: confirmLock ? 'transparent' : 'rgba(255,255,255,0.08)',
-          }}
-        >
-          <T
-            style={{
-              color: confirmLock ? COLORS.MUTED : COLORS.TEXT,
-              fontWeight: '900',
-              fontSize: 11,
-            }}
-          >
-            OFF
-          </T>
-        </Pressable>
-
-        <Pressable
-          onPress={() => setConfirmLockMode(true)}
-          hitSlop={8}
-          style={{
-            paddingVertical: 6,
-            paddingHorizontal: 10,
-            backgroundColor: confirmLock ? COLORS.LOCK_ON_BG : 'transparent',
-            borderLeftWidth: 1,
-            borderLeftColor: 'rgba(30,42,56,0.9)',
-          }}
-        >
-          <T
-            style={{
-              color: confirmLock ? COLORS.DONE : COLORS.MUTED,
-              fontWeight: '900',
-              fontSize: 11,
-            }}
-          >
-            ON
-          </T>
-        </Pressable>
-      </View>
+      <RoutineRow
+        routineId={item.id}
+        title={item.title}
+        status={st}
+        saving={saving}
+        onOpenDetail={openRoutineDetail}
+        onDone={onDone}
+        onRest={onRest}
+        onClear={onClear}
+      />
     );
-  }, [confirmLock, setConfirmLockMode]);
+  }, [statusMap, openRoutineDetail, onDone, onRest, onClear]);
 
-  /**
-   * ✅ Header
-   * - 확인잠금: 균형 카드 우측 상단에 세그먼트 형태로 표시
-   * - 버튼명은 아래에서 쉽게 바꿀 수 있도록 변수화
-   */
-  const addLabel = '호흡 추가'; // ✅ 여기만 바꾸면 됨
+  const listHeader = useCallback(() => (
+    <HeaderBlock
+      todayText={todayText}
+      loading={loading}
+      todayMood={todayMood}
+      moodSaving={moodSaving}
+      onMoodPick={setTodayMood}
+      onMoodClear={clearTodayMood}
+      onGoCreate={() => nav.navigate('RoutineCreate')}
+      allRest={allRest}
+      disableRestAll={loading || routines.length === 0}
+      onToggleRestAll={toggleRestAll}
+      routinesEmpty={routines.length === 0}
+    />
+  ), [todayText, loading, todayMood, moodSaving, setTodayMood, clearTodayMood, nav, allRest, toggleRestAll, routines.length]);
 
-  const Header = useMemo(() => {
-    return (
-      <View style={{ padding: 14, paddingBottom: 12 }}>
-        <T style={{ color: COLORS.TEXT, fontSize: 24, fontWeight: '900' }}>오늘 하루를 기록해 볼까요</T>
-        <T style={{ color: COLORS.MUTED, marginTop: 4 }}>
-          {dayjs().format('M/D ddd')}
-          {loading ? ' · 불러오는 중입니다…' : ''}
-        </T>
+  const onChangeReminderMessage = useCallback((t: string) => {
+    setReminder((p) => ({ ...p, message: t }));
+  }, []);
 
-        {/* 안내 카드 */}
-        <View
-          style={{
-            marginTop: 12,
-            padding: 12,
-            borderRadius: 14,
-            backgroundColor: '#0E141C',
-            borderWidth: 1,
-            borderColor: COLORS.LINE,
-          }}
-        >
-          <T style={{ color: COLORS.MUTED, fontSize: 12, lineHeight: 18, textAlign: 'center' }}>
-            <T style={{ color: COLORS.TEXT, fontWeight: '900' }}>오늘도 여기까지 오셨네요.</T>
-            {'\n'}
-            한 걸음이든, 쉬어 가는 날이든 괜찮습니다.
-          </T>
-        </View>
-
-        {/* BALANCE */}
-        <View
-          style={{
-            marginTop: 12,
-            backgroundColor: COLORS.CARD,
-            borderRadius: 18,
-            borderWidth: 1,
-            borderColor: COLORS.LINE,
-            padding: 14,
-          }}
-        >
-          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-            <T style={{ color: COLORS.TEXT, fontWeight: '900' }}>균형</T>
-
-            {/* ✅ 우측 상단: ON/OFF 세그먼트 */}
-            {ConfirmLockSegment}
-          </View>
-
-          {confirmLock ? (
-            <View
-              style={{
-                marginTop: 10,
-                padding: 12,
-                borderRadius: 14,
-                backgroundColor: '#0E141C',
-                borderWidth: 1,
-                borderColor: COLORS.LINE,
-              }}
-            >
-              <T style={{ color: COLORS.MUTED, fontSize: 12, lineHeight: 18 }}>
-                지금은 <T style={{ color: COLORS.TEXT, fontWeight: '900' }}>숫자 확인을 멈추는 모드</T>입니다.
-                {'\n'}
-                오늘은 “완료/휴식”만 누르면 충분합니다.
-              </T>
-            </View>
-          ) : (
-            <>
-              <T style={{ color: COLORS.MUTED, marginTop: 6, fontSize: 12 }}>
-                전체 기록({total}개) 대비 비율입니다. 미체크는 “아직 결정하지 않음”을 의미합니다.
-              </T>
-
-              <View
-                style={{
-                  marginTop: 12,
-                  height: 18,
-                  borderRadius: 999,
-                  overflow: 'hidden',
-                  borderWidth: 1,
-                  borderColor: COLORS.LINE,
-                  backgroundColor: '#0E141C',
-                  flexDirection: 'row',
-                }}
-              >
-                <View
-                  style={{
-                    flex: doneFlex,
-                    backgroundColor: COLORS.DONE_BG,
-                    borderRightWidth: doneFlex > 0 && noneFlex + restFlex > 0 ? 1 : 0,
-                    borderRightColor: 'rgba(30,42,56,0.8)',
-                  }}
-                />
-                <View
-                  style={{
-                    flex: noneFlex,
-                    backgroundColor: COLORS.NONE_BG,
-                    borderRightWidth: noneFlex > 0 && restFlex > 0 ? 1 : 0,
-                    borderRightColor: 'rgba(30,42,56,0.8)',
-                  }}
-                />
-                <View style={{ flex: restFlex, backgroundColor: COLORS.REST_BG }} />
-              </View>
-
-              <View style={{ flexDirection: 'row', gap: 10, marginTop: 12 }}>
-                <StatBox label="완료" percent={donePct} count={doneCount} color={COLORS.DONE} />
-                <StatBox label="미체크" percent={nonePct} count={noneCount} color={COLORS.NONE} />
-                <StatBox label="휴식" percent={restPct} count={restCount} color={COLORS.REST} />
-              </View>
-
-              <T style={{ color: COLORS.MUTED, marginTop: 10, fontSize: 12 }}>
-                참고: 타이머 기준 완료 {focusMin}분 · 휴식 {restMin}분입니다.
-              </T>
-            </>
-          )}
-        </View>
-
-        {/* ROUTINES HEADER */}
-        <View
-          style={{
-            flexDirection: 'row',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            marginTop: 18,
-          }}
-        >
-          <T style={{ color: COLORS.TEXT, fontWeight: '900' }}>오늘 기록</T>
-
-          <Pressable
-            onPress={() => nav.navigate('RoutineCreate')}
-            style={{
-              paddingVertical: 8,
-              paddingHorizontal: 10,
-              borderRadius: 12,
-              backgroundColor: 'rgba(76,201,255,0.12)',
-              borderWidth: 1,
-              borderColor: 'rgba(76,201,255,0.32)',
-            }}
-          >
-            <T style={{ color: COLORS.DONE, fontWeight: '900', fontSize: 12 }}>{addLabel}</T>
-          </Pressable>
-        </View>
-
-        {/* 오늘은 쉬기 */}
-        <Pressable
-          onPress={toggleRestAll}
-          disabled={loading || routines.length === 0}
-          style={{
-            marginTop: 10,
-            backgroundColor: allRest ? 'rgba(107,127,150,0.14)' : 'rgba(59,231,176,0.16)',
-            borderWidth: 1,
-            borderColor: allRest ? 'rgba(107,127,150,0.35)' : 'rgba(59,231,176,0.32)',
-            paddingVertical: 12,
-            borderRadius: 16,
-            alignItems: 'center',
-            opacity: loading || routines.length === 0 ? 0.6 : 1,
-          }}
-        >
-          <T style={{ color: allRest ? COLORS.MUTED : COLORS.REST, fontWeight: '900' }}>
-            {allRest ? '휴식을 해제합니다 (전체 미체크)' : '오늘은 쉽니다 (전체 휴식)'}
-          </T>
-        </Pressable>
-
-        {routines.length === 0 ? (
-          <View
-            style={{
-              marginTop: 10,
-              backgroundColor: COLORS.CARD,
-              borderRadius: 16,
-              borderWidth: 1,
-              borderColor: COLORS.LINE,
-              padding: 14,
-            }}
-          >
-            <T style={{ color: COLORS.MUTED }}>아직 활성화된 기록이 없습니다.</T>
-          </View>
-        ) : null}
-      </View>
-    );
-  }, [
-    ConfirmLockSegment,
-    addLabel,
-    allRest,
-    confirmLock,
-    doneCount,
-    doneFlex,
-    donePct,
-    focusMin,
-    loading,
-    nav,
-    noneCount,
-    noneFlex,
-    nonePct,
-    restCount,
-    restFlex,
-    restMin,
-    restPct,
-    routines.length,
-    total,
-    toggleRestAll,
-  ]);
-
-  const renderItem: ListRenderItem<Routine> = useCallback(
-    ({ item: r }) => {
-      const st = statusMap.get(r.id);
-      const saving = !!savingRef.current[r.id];
-
-      return (
-        <View
-          style={{
-            marginHorizontal: 14,
-            marginTop: 10,
-            backgroundColor: COLORS.CARD,
-            borderRadius: 16,
-            borderWidth: 1,
-            borderColor: COLORS.LINE,
-            padding: 12,
-          }}
-        >
-          <T style={{ color: COLORS.TEXT, fontWeight: '900' }} numberOfLines={1}>
-            {r.title}
-          </T>
-
-          <View style={{ flexDirection: 'row', gap: 8, marginTop: 10 }}>
-            <Pressable
-              onPress={() => setStatus(r, 'done')}
-              disabled={saving}
-              style={{
-                flex: 1,
-                paddingVertical: 10,
-                borderRadius: 12,
-                alignItems: 'center',
-                backgroundColor: st === 'done' ? COLORS.DONE_BG : '#0E141C',
-                borderWidth: 1,
-                borderColor: st === 'done' ? COLORS.DONE : COLORS.LINE,
-                opacity: saving ? 0.6 : 1,
-              }}
-            >
-              <T style={{ color: st === 'done' ? COLORS.DONE : COLORS.MUTED, fontWeight: '900' }}>완료</T>
-            </Pressable>
-
-            <Pressable
-              onPress={() => clearStatus(r)}
-              disabled={saving}
-              style={{
-                paddingHorizontal: 14,
-                paddingVertical: 10,
-                borderRadius: 12,
-                alignItems: 'center',
-                backgroundColor: st ? COLORS.NONE_BG : 'rgba(107,127,150,0.10)',
-                borderWidth: 1,
-                borderColor: st ? 'rgba(107,127,150,0.35)' : COLORS.LINE,
-                opacity: saving ? 0.6 : 1,
-                minWidth: 52,
-              }}
-            >
-              <T style={{ color: COLORS.MUTED, fontWeight: '900' }}>미체크</T>
-            </Pressable>
-
-            <Pressable
-              onPress={() => setStatus(r, 'rest')}
-              disabled={saving}
-              style={{
-                flex: 1,
-                paddingVertical: 10,
-                borderRadius: 12,
-                alignItems: 'center',
-                backgroundColor: st === 'rest' ? COLORS.REST_BG : '#0E141C',
-                borderWidth: 1,
-                borderColor: st === 'rest' ? COLORS.REST : COLORS.LINE,
-                opacity: saving ? 0.6 : 1,
-              }}
-            >
-              <T style={{ color: st === 'rest' ? COLORS.REST : COLORS.MUTED, fontWeight: '900' }}>휴식</T>
-            </Pressable>
-          </View>
-        </View>
-      );
-    },
-    [clearStatus, setStatus, statusMap]
-  );
+  const listFooter = useCallback(() => (
+    <FooterBlock
+      reminder={reminder}
+      reminderSaving={reminderSaving}
+      timeText={timeText}
+      onToggle={toggleReminder}
+      onChangeMessage={onChangeReminderMessage}
+      onTest={runTest}
+    />
+  ), [reminder, reminderSaving, timeText, toggleReminder, onChangeReminderMessage, runTest]);
 
   return (
     <ScreenContainer bg={COLORS.BG} barStyle="light-content">
@@ -795,25 +1039,181 @@ export default function DashboardScreen() {
         data={routines.length === 0 ? [] : routines}
         keyExtractor={(item) => item.id}
         renderItem={renderItem}
-        ListHeaderComponent={Header}
-        contentContainerStyle={{ paddingBottom: 24 }}
+        ListHeaderComponent={listHeader}
+        ListFooterComponent={listFooter}
+        contentContainerStyle={S.listContainer}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
         refreshControl={
-          confirmLock ? undefined : (
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={onRefresh}
-              tintColor={COLORS.DONE}
-              colors={[COLORS.DONE]}
-              progressBackgroundColor="#0E141C"
-            />
-          )
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            tintColor={COLORS.DONE}
+            colors={[COLORS.DONE]}
+            progressBackgroundColor="#0E141C"
+          />
         }
-        initialNumToRender={8}
-        windowSize={7}
-        maxToRenderPerBatch={10}
-        updateCellsBatchingPeriod={30}
+        initialNumToRender={10}
+        windowSize={9}
+        maxToRenderPerBatch={14}
+        updateCellsBatchingPeriod={16}
         removeClippedSubviews={Platform.OS === 'android'}
       />
     </ScreenContainer>
   );
 }
+
+const S = StyleSheet.create({
+  listContainer: { paddingBottom: 160 },
+
+  headerWrap: { padding: 14, paddingBottom: 12 },
+  h1: { color: COLORS.TEXT, fontSize: 24, fontWeight: '900' },
+  sub: { color: COLORS.MUTED, marginTop: 4 },
+
+  noticeCard: {
+    marginTop: 12,
+    padding: 12,
+    borderRadius: 14,
+    backgroundColor: '#0E141C',
+    borderWidth: 1,
+    borderColor: COLORS.LINE,
+  },
+  noticeText: { color: COLORS.MUTED, fontSize: 12, lineHeight: 18, textAlign: 'center' },
+  noticeStrong: { color: COLORS.TEXT, fontWeight: '900' },
+
+  moodCard: {
+    marginTop: 12,
+    backgroundColor: COLORS.CARD,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: COLORS.LINE,
+    padding: 14,
+  },
+  moodTopRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  cardTitle: { color: COLORS.TEXT, fontWeight: '900' },
+  cardDesc: { color: COLORS.MUTED, marginTop: 6, fontSize: 12, lineHeight: 18 },
+
+  smallBtn: {
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderRadius: 12,
+    backgroundColor: 'rgba(107,127,150,0.10)',
+    borderWidth: 1,
+    borderColor: 'rgba(107,127,150,0.24)',
+  },
+  smallBtnTx: { color: COLORS.MUTED, fontWeight: '900', fontSize: 12 },
+
+  moodBtnsRow: { flexDirection: 'row', gap: 8, marginTop: 12 },
+  moodBtn: { flex: 1, paddingVertical: 10, borderRadius: 14, alignItems: 'center', borderWidth: 1 },
+
+  moodMetaBox: {
+    marginTop: 12,
+    padding: 12,
+    borderRadius: 14,
+    backgroundColor: '#0E141C',
+    borderWidth: 1,
+    borderColor: COLORS.LINE,
+  },
+  moodMetaText: { color: COLORS.MUTED, fontSize: 12, lineHeight: 18, textAlign: 'center' },
+
+  sectionRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 18 },
+  sectionTitle: { color: COLORS.TEXT, fontWeight: '900' },
+  addBtn: {
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderRadius: 12,
+    backgroundColor: COLORS.DONE_BG,
+    borderWidth: 1,
+    borderColor: 'rgba(76,201,255,0.28)',
+  },
+  addBtnTx: { color: COLORS.DONE, fontWeight: '900', fontSize: 12 },
+
+  restAllBtn: {
+    marginTop: 10,
+    borderWidth: 1,
+    paddingVertical: 12,
+    borderRadius: 16,
+    alignItems: 'center',
+  },
+
+  emptyCard: {
+    marginTop: 10,
+    backgroundColor: COLORS.CARD,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: COLORS.LINE,
+    padding: 14,
+  },
+
+  rowCard: {
+    marginHorizontal: 14,
+    marginTop: 10,
+    backgroundColor: COLORS.CARD,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: COLORS.LINE,
+    padding: 12,
+  },
+  rowTitle: { color: COLORS.TEXT, fontWeight: '900', paddingRight: 22 },
+  rowBtns: { flexDirection: 'row', gap: 8, marginTop: 10 },
+
+  chevWrap: {
+    position: 'absolute',
+    top: 10,
+    right: 10,
+    opacity: 0.9,
+  },
+
+  btn: { flex: 1, paddingVertical: 10, borderRadius: 12, alignItems: 'center', borderWidth: 1 },
+  btnMid: { paddingHorizontal: 14, paddingVertical: 10, borderRadius: 12, alignItems: 'center', borderWidth: 1, minWidth: 52 },
+
+  btnInactive: { backgroundColor: '#0E141C', borderColor: COLORS.LINE },
+  btnDoneActive: { backgroundColor: COLORS.DONE_BG, borderColor: 'rgba(76,201,255,0.35)' },
+  btnRestActive: { backgroundColor: COLORS.REST_BG, borderColor: 'rgba(59,231,176,0.35)' },
+
+  btnMidInactive: { backgroundColor: 'rgba(107,127,150,0.08)', borderColor: COLORS.LINE },
+  btnMidActive: { backgroundColor: COLORS.NONE_BG, borderColor: 'rgba(107,127,150,0.24)' },
+
+  btnText: { fontWeight: '900' },
+  txDone: { color: COLORS.DONE },
+  txRest: { color: COLORS.REST },
+  txMuted: { color: COLORS.MUTED },
+
+  btnDisabled: { opacity: 0.6 },
+
+  footerPad: { paddingHorizontal: 14, paddingTop: 14, paddingBottom: 28 },
+  reminderCard: {
+    backgroundColor: '#0E141C',
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: COLORS.LINE,
+    padding: 14,
+  },
+  reminderTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  switchRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+
+  reminderInput: {
+    minHeight: 56,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 14,
+    backgroundColor: '#0B0F14',
+    borderWidth: 1,
+    borderColor: COLORS.LINE,
+    color: COLORS.TEXT,
+    fontSize: 14,
+    lineHeight: 20,
+  },
+
+  testBtn: { flex: 1, paddingVertical: 12, borderRadius: 16, alignItems: 'center', borderWidth: 1 },
+
+  reminderHint: {
+    marginTop: 12,
+    padding: 10,
+    borderRadius: 14,
+    backgroundColor: '#0B0F14',
+    borderWidth: 1,
+    borderColor: COLORS.LINE,
+  },
+  reminderHintTx: { color: COLORS.MUTED, fontSize: 12, lineHeight: 18, textAlign: 'center' },
+});

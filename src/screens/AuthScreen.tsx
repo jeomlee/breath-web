@@ -1,5 +1,5 @@
 // src/screens/AuthScreen.tsx
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import {
   View,
   Text as RNText,
@@ -84,8 +84,101 @@ const OAUTH_BRIDGE_BASE = 'https://breath-oauth-bridge.vercel.app';
 // ✅ Supabase OAuth redirectTo는 브릿지의 callback로 고정(출시 모델용)
 const WEB_REDIRECT_TO = `${OAUTH_BRIDGE_BASE}/auth/callback`;
 
-// ✅ 앱이 받을 returnUrl (openAuthSessionAsync가 성공시 이 URL을 result.url로 돌려줌)
+// ✅ 앱이 받을 returnUrl
 const APP_DEEPLINK = 'breath://auth/callback';
+
+/* =========================
+   ✅ AuthScreen 밖으로 빼서 리마운트 방지
+========================= */
+
+function AuthBtn({
+  label,
+  onPress,
+  tone,
+  icon,
+  loading,
+}: {
+  label: string;
+  onPress: () => void;
+  tone: 'blue' | 'green' | 'neutral';
+  icon: React.ReactNode;
+  loading: boolean;
+}) {
+  const bg = tone === 'blue' ? COLORS.BLUE_BG : tone === 'green' ? COLORS.GREEN_BG : COLORS.GRAY_BG;
+  const border =
+    tone === 'blue' ? COLORS.BLUE_LINE : tone === 'green' ? COLORS.GREEN_LINE : COLORS.GRAY_LINE;
+  const text = tone === 'blue' ? COLORS.BLUE : tone === 'green' ? COLORS.GREEN : COLORS.TEXT;
+
+  return (
+    <Pressable
+      onPress={onPress}
+      disabled={loading}
+      style={({ pressed }) => ({
+        width: '100%',
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 10,
+        paddingVertical: 14,
+        borderRadius: 18,
+        backgroundColor: bg,
+        borderWidth: 1,
+        borderColor: border,
+        opacity: loading ? 0.6 : pressed ? 0.88 : 1,
+      })}
+    >
+      {icon}
+      <T style={{ color: text, fontWeight: '900' }}>{label}</T>
+    </Pressable>
+  );
+}
+
+function AuthField({
+  placeholder,
+  value,
+  onChangeText,
+  secureTextEntry,
+  keyboardType,
+  autoCapitalize,
+  returnKeyType,
+}: {
+  placeholder: string;
+  value: string;
+  onChangeText: (v: string) => void;
+  secureTextEntry?: boolean;
+  keyboardType?: any;
+  autoCapitalize?: any;
+  returnKeyType?: any;
+}) {
+  return (
+    <View
+      style={{
+        width: '100%',
+        borderWidth: 1,
+        borderColor: COLORS.LINE,
+        backgroundColor: COLORS.SURFACE,
+        borderRadius: 18,
+        paddingHorizontal: 14,
+        paddingVertical: 12,
+      }}
+    >
+      <TextInput
+        value={value}
+        onChangeText={onChangeText}
+        placeholder={placeholder}
+        placeholderTextColor="#556477"
+        secureTextEntry={secureTextEntry}
+        keyboardType={keyboardType}
+        autoCapitalize={autoCapitalize}
+        returnKeyType={returnKeyType}
+        autoCorrect={false}
+        style={{ color: COLORS.TEXT, fontWeight: '800' }}
+      />
+    </View>
+  );
+}
+
+/* ========================= */
 
 export default function AuthScreen() {
   const [mode, setMode] = useState<'login' | 'signup'>('login');
@@ -106,14 +199,6 @@ export default function AuthScreen() {
     }
   };
 
-  /**
-   * ✅ 핵심:
-   * - signInWithOAuth로 URL 얻고
-   * - WebBrowser.openAuthSessionAsync로 "브라우저 세션" 실행
-   * - 성공 시 result.url (breath://auth/callback#...)을 즉시 파싱해서 setSession/exchange
-   *
-   * => App.tsx Linking 이벤트에 의존 안 함 (지금 너 환경에서 이게 정답)
-   */
   const signInWithGoogle = async () => {
     Keyboard.dismiss();
 
@@ -122,7 +207,6 @@ export default function AuthScreen() {
         provider: 'google',
         options: {
           redirectTo: WEB_REDIRECT_TO,
-          // ✅ (중요) 모바일에서는 우리가 직접 브라우저를 열 거라 자동 리다이렉트 방지
           skipBrowserRedirect: true,
         },
       });
@@ -130,93 +214,66 @@ export default function AuthScreen() {
       if (error) return Alert.alert('로그인 실패', error.message);
       if (!data?.url) return Alert.alert('로그인 실패', '인증 URL을 가져오지 못했습니다.');
 
-      console.log('OAUTH_URL =>', data.url);
-
-      // ✅ 어떤 브라우저든(환경별 기본 인증 세션) 안정적으로 동작하도록 openAuthSessionAsync 사용
       const result = await WebBrowser.openAuthSessionAsync(data.url, APP_DEEPLINK);
-      console.log('[openAuthSessionAsync]', result);
 
-      if (result.type !== 'success' || !result.url) {
-        // cancel / dismiss 등
-        return;
-      }
+      if (result.type !== 'success' || !result.url) return;
 
-      // 1) code flow (혹시 code로 올 때)
       const code = extractCodeFromUrl(result.url);
       if (code) {
         const { error: exErr } = await supabase.auth.exchangeCodeForSession(code);
-        if (exErr) {
-          console.log('[exchangeCodeForSession error]', exErr);
-          return Alert.alert('로그인 실패', exErr.message);
-        }
+        if (exErr) return Alert.alert('로그인 실패', exErr.message);
         return;
       }
 
-      // 2) token hash flow (#access_token=...)
       const { access_token, refresh_token } = extractTokensFromHash(result.url);
       if (access_token && refresh_token) {
-        const { error: setErr } = await supabase.auth.setSession({
-          access_token,
-          refresh_token,
-        });
-
-        if (setErr) {
-          console.log('[setSession error]', setErr);
-          return Alert.alert('로그인 실패', setErr.message);
-        }
+        const { error: setErr } = await supabase.auth.setSession({ access_token, refresh_token });
+        if (setErr) return Alert.alert('로그인 실패', setErr.message);
         return;
       }
 
-      console.log('[Auth] No code/tokens in return url');
       Alert.alert('로그인 실패', '콜백 URL에서 인증 정보를 찾지 못했습니다.');
     });
   };
 
-const signInWithApple = async () => {
-  Keyboard.dismiss();
+  const signInWithApple = async () => {
+    Keyboard.dismiss();
 
-  await withLoading(async () => {
-    if (Platform.OS !== 'ios') return;
+    await withLoading(async () => {
+      if (Platform.OS !== 'ios') return;
 
-    // ✅ 1) 기기 지원 여부 먼저 체크
-    const available = await AppleAuthentication.isAvailableAsync();
-    if (!available) {
-      Alert.alert('로그인 실패', '이 기기에서는 Apple 로그인을 사용할 수 없습니다.');
-      return;
-    }
-
-    try {
-      const cred = await AppleAuthentication.signInAsync({
-        requestedScopes: [
-          AppleAuthentication.AppleAuthenticationScope.FULL_NAME,
-          AppleAuthentication.AppleAuthenticationScope.EMAIL,
-        ],
-      });
-
-      // 사용자가 취소한 경우도 여기로 들어올 수 있음
-      if (!cred?.identityToken) {
-        Alert.alert('로그인 실패', 'Apple identityToken을 가져오지 못했습니다.');
+      const available = await AppleAuthentication.isAvailableAsync();
+      if (!available) {
+        Alert.alert('로그인 실패', '이 기기에서는 Apple 로그인을 사용할 수 없습니다.');
         return;
       }
 
-      const { error } = await supabase.auth.signInWithIdToken({
-        provider: 'apple',
-        token: cred.identityToken,
-      });
+      try {
+        const cred = await AppleAuthentication.signInAsync({
+          requestedScopes: [
+            AppleAuthentication.AppleAuthenticationScope.FULL_NAME,
+            AppleAuthentication.AppleAuthenticationScope.EMAIL,
+          ],
+        });
 
-      if (error) {
-        Alert.alert('로그인 실패', error.message);
-        return;
+        if (!cred?.identityToken) {
+          Alert.alert('로그인 실패', 'Apple identityToken을 가져오지 못했습니다.');
+          return;
+        }
+
+        const { error } = await supabase.auth.signInWithIdToken({
+          provider: 'apple',
+          token: cred.identityToken,
+        });
+
+        if (error) Alert.alert('로그인 실패', error.message);
+      } catch (e: any) {
+        const msg = e?.message ?? String(e);
+        console.log('[AppleLoginError]', e);
+        Alert.alert('로그인 실패', msg);
       }
-    } catch (e: any) {
-      // ✅ 2) 여기서 무조건 원인 노출
-      const msg = e?.message ?? String(e);
-      console.log('[AppleLoginError]', e);
-      Alert.alert('로그인 실패', msg);
-    }
-  });
-};
-
+    });
+  };
 
   const signInWithEmail = async () => {
     Keyboard.dismiss();
@@ -248,88 +305,6 @@ const signInWithApple = async () => {
       Alert.alert('가입 완료', '메일함에서 인증을 완료한 뒤 로그인해 주세요.');
       setMode('login');
     });
-  };
-
-  const Btn = ({
-    label,
-    onPress,
-    tone,
-    icon,
-  }: {
-    label: string;
-    onPress: () => void;
-    tone: 'blue' | 'green' | 'neutral';
-    icon: React.ReactNode;
-  }) => {
-    const bg =
-      tone === 'blue' ? COLORS.BLUE_BG : tone === 'green' ? COLORS.GREEN_BG : COLORS.GRAY_BG;
-    const border =
-      tone === 'blue' ? COLORS.BLUE_LINE : tone === 'green' ? COLORS.GREEN_LINE : COLORS.GRAY_LINE;
-    const text = tone === 'blue' ? COLORS.BLUE : tone === 'green' ? COLORS.GREEN : COLORS.TEXT;
-
-    return (
-      <Pressable
-        onPress={onPress}
-        disabled={loading}
-        style={({ pressed }) => ({
-          width: '100%',
-          flexDirection: 'row',
-          alignItems: 'center',
-          justifyContent: 'center',
-          gap: 10,
-          paddingVertical: 14,
-          borderRadius: 18,
-          backgroundColor: bg,
-          borderWidth: 1,
-          borderColor: border,
-          opacity: loading ? 0.6 : pressed ? 0.88 : 1,
-        })}
-      >
-        {icon}
-        <T style={{ color: text, fontWeight: '900' }}>{label}</T>
-      </Pressable>
-    );
-  };
-
-  const Field = ({
-    placeholder,
-    value,
-    onChangeText,
-    secureTextEntry,
-    keyboardType,
-    autoCapitalize,
-  }: {
-    placeholder: string;
-    value: string;
-    onChangeText: (v: string) => void;
-    secureTextEntry?: boolean;
-    keyboardType?: any;
-    autoCapitalize?: any;
-  }) => {
-    return (
-      <View
-        style={{
-          width: '100%',
-          borderWidth: 1,
-          borderColor: COLORS.LINE,
-          backgroundColor: COLORS.SURFACE,
-          borderRadius: 18,
-          paddingHorizontal: 14,
-          paddingVertical: 12,
-        }}
-      >
-        <TextInput
-          value={value}
-          onChangeText={onChangeText}
-          placeholder={placeholder}
-          placeholderTextColor="#556477"
-          secureTextEntry={secureTextEntry}
-          keyboardType={keyboardType}
-          autoCapitalize={autoCapitalize}
-          style={{ color: COLORS.TEXT, fontWeight: '800' }}
-        />
-      </View>
-    );
   };
 
   return (
@@ -406,18 +381,20 @@ const signInWithApple = async () => {
           </View>
 
           <View style={{ width: '100%', marginTop: 18, gap: 10 }}>
-            <Btn
+            <AuthBtn
               label="Google로 계속"
               onPress={signInWithGoogle}
               tone="blue"
+              loading={loading}
               icon={<Ionicons name="logo-google" size={18} color={COLORS.BLUE} />}
             />
 
             {Platform.OS === 'ios' ? (
-              <Btn
+              <AuthBtn
                 label="Apple로 계속"
                 onPress={signInWithApple}
                 tone="neutral"
+                loading={loading}
                 icon={<Ionicons name="logo-apple" size={20} color={COLORS.TEXT} />}
               />
             ) : null}
@@ -451,33 +428,37 @@ const signInWithApple = async () => {
 
             {emailOpen ? (
               <View style={{ width: '100%', gap: 10, marginTop: 6 }}>
-                <Field
+                <AuthField
                   placeholder="이메일"
                   value={email}
                   onChangeText={setEmail}
                   keyboardType="email-address"
                   autoCapitalize="none"
+                  returnKeyType="next"
                 />
-                <Field
+                <AuthField
                   placeholder="비밀번호 (6자 이상)"
                   value={password}
                   onChangeText={setPassword}
                   secureTextEntry
                   autoCapitalize="none"
+                  returnKeyType="done"
                 />
 
                 {mode === 'login' ? (
-                  <Btn
+                  <AuthBtn
                     label="로그인"
                     onPress={signInWithEmail}
                     tone="green"
+                    loading={loading}
                     icon={<Ionicons name="log-in-outline" size={18} color={COLORS.GREEN} />}
                   />
                 ) : (
-                  <Btn
+                  <AuthBtn
                     label="가입하기"
                     onPress={signUpWithEmail}
                     tone="green"
+                    loading={loading}
                     icon={<Ionicons name="person-add-outline" size={18} color={COLORS.GREEN} />}
                   />
                 )}

@@ -10,19 +10,17 @@ import {
   Platform,
   SafeAreaView,
   StatusBar,
-  Switch,
+  DeviceEventEmitter,
 } from 'react-native';
-import { useRoute, useNavigation } from '@react-navigation/native';
+import { useRoute, useNavigation, CommonActions } from '@react-navigation/native';
 import type { RouteProp } from '@react-navigation/native';
 import dayjs from 'dayjs';
 import { Calendar } from 'react-native-calendars';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import { supabase } from '../api/supabaseClient';
 import type { InsightsStackParamList } from '../navigation/types';
 
-type DailyStatus = 'done' | 'rest' | 'unknown';
-
+type DailyStatus = 'done' | 'rest';
 type DailyLogRow = {
   date_key: string;
   routine_id: string | null;
@@ -35,86 +33,140 @@ const LINE = '#1E2A38';
 const MUTED = '#8FA3B8';
 const TEXT = '#EAF2FF';
 
-const FOCUS = '#4CC9FF';
-const REST = '#3BE7B0';
-const UNKNOWN = '#263444';
+const FOCUS = '#4CC9FF'; // 완료
+const REST = '#3BE7B0'; // 휴식
+const UNCHECK = '#1A2330'; // 미체크(기본)
 
-const CONFIRM_LOCK_KEY = 'breath_confirm_lock_enabled_v1';
+function TrendBadge({
+  label,
+  diffPct,
+  accent,
+}: {
+  label: string;
+  diffPct: number; // +: ▲, -: ▼
+  accent: string;
+}) {
+  const up = diffPct > 0;
+  const down = diffPct < 0;
+  const arrow = up ? '▲' : down ? '▼' : '—';
+  const shown = Math.abs(diffPct);
 
-function hexToRgb(hex: string) {
-  const c = hex.replace('#', '');
-  const r = parseInt(c.slice(0, 2), 16);
-  const g = parseInt(c.slice(2, 4), 16);
-  const b = parseInt(c.slice(4, 6), 16);
-  return { r, g, b };
-}
+  const toneBg = up
+    ? 'rgba(76,201,255,0.10)'
+    : down
+    ? 'rgba(59,231,176,0.08)'
+    : 'rgba(255,255,255,0.06)';
+  const toneBorder = up
+    ? 'rgba(76,201,255,0.25)'
+    : down
+    ? 'rgba(59,231,176,0.22)'
+    : LINE;
 
-function mixHex(a: string, b: string, t: number) {
-  const A = hexToRgb(a);
-  const B = hexToRgb(b);
-  const r = Math.round(A.r + (B.r - A.r) * t);
-  const g = Math.round(A.g + (B.g - A.g) * t);
-  const bb = Math.round(A.b + (B.b - A.b) * t);
-  return `rgb(${r},${g},${bb})`;
-}
-
-function rgbaFromRgb(rgb: string, a: number) {
-  const m = rgb.match(/rgb\((\d+),(\d+),(\d+)\)/);
-  if (!m) return `rgba(255,255,255,${a})`;
-  return `rgba(${m[1]},${m[2]},${m[3]},${a})`;
+  return (
+    <View
+      style={{
+        paddingVertical: 6,
+        paddingHorizontal: 10,
+        borderRadius: 999,
+        borderWidth: 1,
+        borderColor: toneBorder,
+        backgroundColor: toneBg,
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 6,
+      }}
+    >
+      <Text style={{ color: MUTED, fontSize: 11, fontWeight: '900' }}>{label}</Text>
+      <Text style={{ color: accent, fontSize: 11, fontWeight: '900' }}>
+        {arrow} {shown}%
+      </Text>
+    </View>
+  );
 }
 
 export default function RoutineDetailScreen() {
-  const navigation = useNavigation();
+  const navigation = useNavigation<any>();
   const route = useRoute<RouteProp<InsightsStackParamList, 'RoutineDetail'>>();
-  const { routineId, title } = route.params;
+  const { routineId } = route.params;
 
+  const [title, setTitle] = useState<string>('호흡');
   const [logs, setLogs] = useState<DailyLogRow[]>([]);
-  const [confirmLock, setConfirmLock] = useState(false);
-
+  const [savingToday, setSavingToday] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const bootedRef = useRef(false);
 
-  // ✅ 히트맵 범위(기존 유지)
+  // ✅ 공유 여부(공유 루틴이면 이 화면에서 삭제 금지)
+  const [isShared, setIsShared] = useState<boolean>(false);
+  const [sharedRoomId, setSharedRoomId] = useState<string | null>(null);
+  const [checkingShared, setCheckingShared] = useState<boolean>(true);
+
+  // ✅ 히트맵 범위
   const weeks = 12;
-  const days = weeks * 7;
+  const days = weeks * 7; // 84
   const heatStart = dayjs().startOf('day').subtract(days - 1, 'day').format('YYYY-MM-DD');
   const heatEnd = dayjs().startOf('day').format('YYYY-MM-DD');
 
-  // ✅ 캘린더 범위(기존 유지)
+  // ✅ 캘린더 범위
   const calStart = dayjs().startOf('month').subtract(7, 'day').format('YYYY-MM-DD');
   const calEnd = dayjs().endOf('month').add(7, 'day').format('YYYY-MM-DD');
 
-  // ✅ 확인 잠금 시: 최근 3일만 볼 수 있게 제한
-  const lockRange = useMemo(() => {
-    const max = dayjs().format('YYYY-MM-DD');
-    const min = dayjs().subtract(2, 'day').format('YYYY-MM-DD');
-    return { min, max };
-  }, []);
-
-  const loadConfirmLock = useCallback(async () => {
-    try {
-      const v = await AsyncStorage.getItem(CONFIRM_LOCK_KEY);
-      setConfirmLock(v === '1');
-    } catch {
-      setConfirmLock(false);
-    }
-  }, []);
-
-  const applyConfirmLock = useCallback(async (next: boolean) => {
-    setConfirmLock(next);
-    try {
-      await AsyncStorage.setItem(CONFIRM_LOCK_KEY, next ? '1' : '0');
-    } catch {
-      // ignore
-    }
-
-    Alert.alert(
-      '확인 잠금',
-      next
-        ? '켜짐\n\n• 과거 확인이 제한됩니다\n• 최근 3일만 볼 수 있습니다'
-        : '꺼짐\n\n• 과거 확인 제한이 해제됩니다'
+  // ✅ "항상 인사이트 홈으로" 뒤로가기 (스택을 루트로 reset)
+  const goInsightsHome = useCallback(() => {
+    navigation.dispatch(
+      CommonActions.reset({
+        index: 0,
+        routes: [{ name: 'InsightsHome' }],
+      })
     );
-  }, []);
+  }, [navigation]);
+
+  // ✅ routine title을 routineId 기반으로 매번 로드
+  const loadRoutineTitle = useCallback(async () => {
+    const user = (await supabase.auth.getUser()).data.user;
+    if (!user) return;
+
+    const { data, error } = await supabase
+      .from('routines')
+      .select('title')
+      .eq('user_id', user.id)
+      .eq('id', routineId)
+      .maybeSingle();
+
+    if (error) return;
+    const t = (data?.title ?? '').trim();
+    if (t) setTitle(t);
+    else setTitle('호흡');
+  }, [routineId]);
+
+  // ✅ 이 루틴이 공유방에 연결되어 있는지 확인
+  //    - shared_routine_rooms에 routine_id가 있으면 "공유 루틴"
+  //    - owner가 아니더라도 조회가 가능하도록 RLS를 구성해두는 게 베스트
+  const loadIsShared = useCallback(async () => {
+    setCheckingShared(true);
+    try {
+      const user = (await supabase.auth.getUser()).data.user;
+      if (!user) return;
+
+      const { data, error } = await supabase
+        .from('shared_routine_rooms')
+        .select('id')
+        .eq('routine_id', routineId)
+        .limit(1);
+
+      if (error) {
+        // 공유 여부를 못 읽는 환경이면 "안전하게 공유로 간주" (삭제 막기)
+        setIsShared(true);
+        setSharedRoomId(null);
+        return;
+      }
+
+      const roomId = (data && data.length > 0 ? data[0]?.id : null) as any;
+      setIsShared(!!roomId);
+      setSharedRoomId(roomId ?? null);
+    } finally {
+      setCheckingShared(false);
+    }
+  }, [routineId]);
 
   const load = useCallback(async () => {
     const user = (await supabase.auth.getUser()).data.user;
@@ -123,36 +175,29 @@ export default function RoutineDetailScreen() {
     const start = dayjs(heatStart).isBefore(calStart) ? heatStart : calStart;
     const end = dayjs(heatEnd).isAfter(calEnd) ? heatEnd : calEnd;
 
-    // ✅ confirmLock 켜져 있으면 최근 3일만 조회
-    const from = confirmLock ? lockRange.min : start;
-    const to = confirmLock ? lockRange.max : end;
-
     const { data, error } = await supabase
       .from('daily_logs')
       .select('date_key,routine_id,status')
       .eq('user_id', user.id)
       .eq('routine_id', routineId)
-      .in('status', ['done', 'rest', 'unknown'])
-      .gte('date_key', from)
-      .lte('date_key', to);
+      .in('status', ['done', 'rest'])
+      .gte('date_key', start)
+      .lte('date_key', end);
 
     if (error) return Alert.alert('불러오기 실패', error.message);
     setLogs((data as any) || []);
-  }, [routineId, heatStart, heatEnd, calStart, calEnd, confirmLock, lockRange.min, lockRange.max]);
+  }, [routineId, heatStart, heatEnd, calStart, calEnd]);
 
   useEffect(() => {
     (async () => {
-      if (bootedRef.current) return;
-      bootedRef.current = true;
-      await loadConfirmLock();
+      if (!bootedRef.current) bootedRef.current = true;
+      await loadRoutineTitle();
+      await load();
+      await loadIsShared(); // ✅ 추가
     })();
-  }, [loadConfirmLock]);
+  }, [load, loadRoutineTitle, loadIsShared]);
 
-  useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [confirmLock]);
-
+  // ✅ date -> status
   const statusByDate = useMemo(() => {
     const m = new Map<string, DailyStatus>();
     for (const row of logs) {
@@ -162,47 +207,66 @@ export default function RoutineDetailScreen() {
     return m;
   }, [logs]);
 
-  const doneSet = useMemo(() => {
-    const set = new Set<string>();
-    for (const [d, s] of statusByDate.entries()) if (s === 'done') set.add(d);
-    return set;
-  }, [statusByDate]);
-
-  const restSet = useMemo(() => {
-    const set = new Set<string>();
-    for (const [d, s] of statusByDate.entries()) if (s === 'rest') set.add(d);
-    return set;
-  }, [statusByDate]);
-
-  const unknownSet = useMemo(() => {
-    const set = new Set<string>();
-    for (const [d, s] of statusByDate.entries()) if (s === 'unknown') set.add(d);
-    return set;
-  }, [statusByDate]);
-
-  const stats = useMemo(() => {
-    const done = doneSet.size;
-    const rest = restSet.size;
-    const unknown = unknownSet.size;
-    const total = done + rest + unknown;
-
-    const drTotal = done + rest; // unknown 제외
-    const focusPct = drTotal <= 0 ? 0 : Math.round((done / drTotal) * 100);
-    const restPct = drTotal <= 0 ? 0 : Math.round((rest / drTotal) * 100);
-
-    return { done, rest, unknown, total, focusPct, restPct };
-  }, [doneSet, restSet, unknownSet]);
-
+  // ✅ 84일 dayList
   const dayList = useMemo(() => {
     const arr: string[] = [];
     for (let i = 0; i < days; i++) arr.push(dayjs(heatStart).add(i, 'day').format('YYYY-MM-DD'));
     return arr;
   }, [heatStart, days]);
 
+  // ✅ 최근 7일 dayList
+  const dayList7 = useMemo(() => {
+    const start7 = dayjs().startOf('day').subtract(6, 'day');
+    const arr: string[] = [];
+    for (let i = 0; i < 7; i++) arr.push(start7.add(i, 'day').format('YYYY-MM-DD'));
+    return arr;
+  }, []);
+
+  const calcStats = useCallback(
+    (list: string[]) => {
+      let done = 0;
+      let rest = 0;
+      let uncheck = 0;
+
+      for (const d of list) {
+        const st = statusByDate.get(d);
+        if (st === 'done') done++;
+        else if (st === 'rest') rest++;
+        else uncheck++;
+      }
+
+      const total = list.length;
+      const focusPct = total <= 0 ? 0 : Math.round((done / total) * 100);
+      const restPct = total <= 0 ? 0 : Math.round((rest / total) * 100);
+      const uncheckPct = total <= 0 ? 0 : Math.max(0, 100 - focusPct - restPct);
+
+      return { done, rest, uncheck, total, focusPct, restPct, uncheckPct };
+    },
+    [statusByDate]
+  );
+
+  const stats84 = useMemo(() => calcStats(dayList), [calcStats, dayList]);
+  const stats7 = useMemo(() => calcStats(dayList7), [calcStats, dayList7]);
+  const stats = stats84;
+
+  // ✅ 트렌드: 7일 - 84일
+  const diffFocus = useMemo(() => stats7.focusPct - stats84.focusPct, [stats7.focusPct, stats84.focusPct]);
+  const diffRest = useMemo(() => stats7.restPct - stats84.restPct, [stats7.restPct, stats84.restPct]);
+
+  // ✅ 왼쪽 카드 비율바: 완료 → 미체크 → 휴식
+  const bar = useMemo(() => {
+    const total = Math.max(1, stats.total);
+    const f = stats.done / total;
+    const u = stats.uncheck / total;
+    const r = Math.max(0, 1 - f - u);
+    return { f, r, u };
+  }, [stats.done, stats.uncheck, stats.total]);
+
+  // ✅ 히트맵 grid
   const heatGrid = useMemo(() => {
-    const cols: { date: string; status: DailyStatus | 'none' }[][] = [];
+    const cols: { date: string; status: 'done' | 'rest' | 'none' }[][] = [];
     for (let w = 0; w < weeks; w++) {
-      const col: { date: string; status: DailyStatus | 'none' }[] = [];
+      const col: { date: string; status: 'done' | 'rest' | 'none' }[] = [];
       for (let r = 0; r < 7; r++) {
         const idx = w * 7 + r;
         const date = dayList[idx];
@@ -214,65 +278,28 @@ export default function RoutineDetailScreen() {
     return cols;
   }, [weeks, dayList, statusByDate]);
 
+  // ✅ 캘린더 마킹
   const markedDates = useMemo(() => {
     const marks: Record<string, any> = {};
-
-    for (const d of doneSet.values()) {
-      marks[d] = { selected: true, selectedColor: FOCUS, selectedTextColor: BG };
+    for (const d of dayList) {
+      const st = statusByDate.get(d);
+      if (st === 'done') marks[d] = { selected: true, selectedColor: FOCUS, selectedTextColor: BG };
+      else if (st === 'rest') marks[d] = { selected: true, selectedColor: REST, selectedTextColor: BG };
     }
-    for (const d of restSet.values()) {
-      if (marks[d]) continue;
-      marks[d] = { selected: true, selectedColor: REST, selectedTextColor: BG };
-    }
-    for (const d of unknownSet.values()) {
-      if (marks[d]) continue;
-      marks[d] = { marked: true, dotColor: UNKNOWN };
-    }
-
     return marks;
-  }, [doneSet, restSet, unknownSet]);
-
-  const ratioColor = useMemo(() => {
-    const drTotal = stats.done + stats.rest;
-    const t = drTotal <= 0 ? 0.5 : stats.done / drTotal; // 0=REST, 1=FOCUS
-    return mixHex(REST, FOCUS, t);
-  }, [stats.done, stats.rest]);
+  }, [dayList, statusByDate]);
 
   const guidance = useMemo(() => {
-    const drTotal = stats.done + stats.rest;
-
-    if (drTotal <= 0) {
-      return {
-        tone: 'neutral' as const,
-        title: '완료/휴식 기록이 없습니다.',
-        body: '확정하지 않아도 괜찮습니다. 필요하면 “모름”을 남겨도 됩니다.',
-      };
+    if (stats.done + stats.rest <= 0) {
+      return { tone: 'neutral' as const, title: '기록이 없습니다.', body: '아무것도 체크하지 않은 날은 “미체크”로 남습니다.' };
     }
-
-    const overheatFocusPct = 80;
-    const tooLooseRestPct = 70;
-
-    if (stats.focusPct >= overheatFocusPct) {
-      return {
-        tone: 'overheat' as const,
-        title: '과열 구간입니다.',
-        body: '완료 흐름이 아주 좋습니다. 과열되기 전에 휴식을 한 번 넣어 주시면 더 오래 갑니다.',
-      };
+    if (stats.focusPct >= 80) {
+      return { tone: 'overheat' as const, title: '완료 비중이 높습니다.', body: '흐름이 좋습니다. 과열되기 전에 휴식을 한 번 섞어두면 더 오래 갑니다.' };
     }
-
-    if (stats.restPct >= tooLooseRestPct) {
-      return {
-        tone: 'loose' as const,
-        title: '흐름이 조금 느슨해졌습니다.',
-        body: '휴식도 유지의 일부입니다. 오늘은 5분만 “시작”으로 연결해 보세요.',
-      };
+    if (stats.restPct >= 70) {
+      return { tone: 'loose' as const, title: '휴식 비중이 높습니다.', body: '휴식도 유지의 일부입니다. 오늘은 5분만 “시작”으로 연결해 보세요.' };
     }
-
-    return {
-      tone: 'ok' as const,
-      title: '균형이 좋습니다.',
-      body: '완료와 휴식이 같이 쌓이고 있습니다. 지금 흐름 그대로만 가도 충분합니다.',
-    };
+    return { tone: 'ok' as const, title: '균형이 좋습니다.', body: '완료/휴식이 같이 쌓이고 있습니다. 지금 흐름 그대로만 가도 충분합니다.' };
   }, [stats.done, stats.rest, stats.focusPct, stats.restPct]);
 
   const guideAccent = useMemo(() => {
@@ -284,10 +311,131 @@ export default function RoutineDetailScreen() {
   const guideBorder = useMemo(() => {
     if (guidance.tone === 'overheat') return 'rgba(76,201,255,0.35)';
     if (guidance.tone === 'loose') return 'rgba(59,231,176,0.28)';
-    return 'rgba(31,42,56,1)';
+    return LINE;
   }, [guidance.tone]);
 
-  // ✅ 상태바 가림 해결(안드로이드 대비)
+  const todayKey = useMemo(() => dayjs().format('YYYY-MM-DD'), []);
+  const todayStatus = useMemo(() => statusByDate.get(todayKey) ?? null, [statusByDate, todayKey]);
+
+  /**
+   * ✅✅✅ 저장 로직
+   */
+  const saveToday = useCallback(
+    async (status: DailyStatus) => {
+      if (savingToday) return;
+
+      const user = (await supabase.auth.getUser()).data.user;
+      if (!user) return;
+
+      setSavingToday(true);
+
+      setLogs((prev) => {
+        const next = [...prev];
+        const idx = next.findIndex((r) => r.date_key === todayKey && r.routine_id === routineId);
+        if (idx >= 0) next[idx] = { ...next[idx], status };
+        else next.push({ date_key: todayKey, routine_id: routineId, status });
+        return next;
+      });
+
+      try {
+        const payload = { user_id: user.id, date_key: todayKey, routine_id: routineId, status };
+
+        const up = await supabase
+          .from('daily_logs')
+          .upsert(payload as any, { onConflict: 'user_id,routine_id,date_key' })
+          .select('date_key,routine_id,status');
+
+        if (up.error) {
+          const upd = await supabase
+            .from('daily_logs')
+            .update({ status })
+            .match({ user_id: user.id, routine_id: routineId, date_key: todayKey })
+            .select('date_key,routine_id,status');
+
+          if (upd.error) {
+            const ins = await supabase.from('daily_logs').insert(payload as any);
+            if (ins.error) throw ins.error;
+          } else {
+            const updatedCount = Array.isArray(upd.data) ? upd.data.length : 0;
+            if (updatedCount === 0) {
+              const ins = await supabase.from('daily_logs').insert(payload as any);
+              if (ins.error) throw ins.error;
+            }
+          }
+        }
+      } catch (e: any) {
+        Alert.alert('저장 실패', e?.message ?? '알 수 없는 오류가 발생했습니다.');
+        await load();
+      } finally {
+        await load();
+        setSavingToday(false);
+      }
+    },
+    [savingToday, todayKey, routineId, load]
+  );
+
+  /**
+   * ✅ 하드 삭제(개인 루틴에서만)
+   * - 공유 루틴이면 여기서 삭제 금지 (공유 호흡 화면에서만)
+   * - DB FK ON DELETE CASCADE 세팅되어 있으면 관련 데이터는 자동 삭제
+   */
+  const doDelete = useCallback(async () => {
+    if (deleting) return;
+
+    if (checkingShared) {
+      return Alert.alert('잠시만요', '공유 여부를 확인 중입니다.');
+    }
+
+    if (isShared) {
+      return Alert.alert(
+        '공유 중인 루틴입니다',
+        '공유 호흡 화면에서만 삭제할 수 있습니다.',
+        [
+          { text: '확인' },
+          // 네 앱에 공유 호흡 화면 라우트가 있으면 여기로 보내도 됨.
+          // { text: '이동', onPress: () => navigation.navigate('SharedBreathRoom', { roomId: sharedRoomId }) },
+        ]
+      );
+    }
+
+    Alert.alert(
+      '삭제하시겠습니까?',
+      '삭제하면 기록까지 모두 삭제됩니다.',
+      [
+        { text: '취소', style: 'cancel' },
+        {
+          text: '삭제',
+          style: 'destructive',
+          onPress: async () => {
+            const user = (await supabase.auth.getUser()).data.user;
+            if (!user) return;
+
+            setDeleting(true);
+            try {
+              const { error } = await supabase
+                .from('routines')
+                .delete()
+                .eq('user_id', user.id)
+                .eq('id', routineId);
+
+              if (error) throw error;
+
+              DeviceEventEmitter.emit('ROUTINE_DELETED', { routineId });
+              DeviceEventEmitter.emit('ROUTINES_CHANGED');
+
+              goInsightsHome();
+            } catch (e: any) {
+              Alert.alert('삭제 실패', e?.message ?? '알 수 없는 오류가 발생했습니다.');
+            } finally {
+              setDeleting(false);
+            }
+          },
+        },
+      ],
+      { cancelable: true }
+    );
+  }, [deleting, routineId, goInsightsHome, isShared, checkingShared, sharedRoomId]);
+
   const androidTopPad = Platform.OS === 'android' ? (StatusBar.currentHeight ?? 0) : 0;
 
   return (
@@ -298,18 +446,11 @@ export default function RoutineDetailScreen() {
         keyboardVerticalOffset={Platform.OS === 'ios' ? 8 : 0}
       >
         <ScrollView contentContainerStyle={{ paddingTop: 14, paddingHorizontal: 16, paddingBottom: 24 }}>
-          {/* ✅ 헤더 + 스위치형 UX */}
+          {/* 헤더 */}
           <View style={{ marginBottom: 12 }}>
-            <View
-              style={{
-                flexDirection: 'row',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                gap: 10,
-              }}
-            >
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
               <Pressable
-                onPress={() => navigation.goBack()}
+                onPress={goInsightsHome}
                 style={{
                   paddingVertical: 10,
                   paddingHorizontal: 12,
@@ -325,44 +466,50 @@ export default function RoutineDetailScreen() {
                 <Text style={{ color: MUTED, fontWeight: '900' }}>←</Text>
               </Pressable>
 
-              <Text style={{ color: TEXT, fontSize: 16, fontWeight: '900', flex: 1 }} numberOfLines={1}>
+              <Text
+                style={{ color: TEXT, fontSize: 16, fontWeight: '900', flex: 1, textAlign: 'center' }}
+                numberOfLines={1}
+              >
                 {title}
               </Text>
+
+              {/* ✅ 우측 상단: 삭제 (공유 루틴이면 비활성) */}
+              <Pressable
+                onPress={doDelete}
+                disabled={deleting || checkingShared || isShared}
+                style={{
+                  paddingVertical: 10,
+                  paddingHorizontal: 12,
+                  borderRadius: 14,
+                  backgroundColor: isShared ? 'rgba(255,255,255,0.06)' : 'rgba(255,99,132,0.10)',
+                  borderWidth: 1,
+                  borderColor: isShared ? LINE : 'rgba(255,99,132,0.24)',
+                  minWidth: 44,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  opacity: deleting || checkingShared || isShared ? 0.55 : 1,
+                }}
+              >
+                <Text style={{ color: isShared ? MUTED : 'rgba(255,99,132,0.95)', fontWeight: '900' }}>
+                  {checkingShared ? '…' : deleting ? '…' : isShared ? '공유중' : '삭제'}
+                </Text>
+              </Pressable>
             </View>
 
-            {/* 스위치 카드 */}
-            <View
-              style={{
-                marginTop: 10,
-                backgroundColor: CARD,
-                borderWidth: 1,
-                borderColor: confirmLock ? 'rgba(76,201,255,0.35)' : LINE,
-                borderRadius: 16,
-                padding: 12,
-                flexDirection: 'row',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-              }}
-            >
-              <View style={{ flex: 1, paddingRight: 10 }}>
-                <Text style={{ color: TEXT, fontWeight: '900' }}>확인 잠금</Text>
-                <Text style={{ color: MUTED, fontSize: 12, marginTop: 4, lineHeight: 18 }}>
-                  {confirmLock ? '최근 3일만 확인 가능' : '과거 확인 제한 없음'}
+            {/* ✅ 공유 루틴 안내(옵션) */}
+            {isShared && (
+              <View style={{ marginTop: 10, padding: 12, borderRadius: 14, backgroundColor: 'rgba(255,255,255,0.06)', borderWidth: 1, borderColor: LINE }}>
+                <Text style={{ color: MUTED, fontSize: 12, lineHeight: 18 }}>
+                  이 루틴은 <Text style={{ color: TEXT, fontWeight: '900' }}>공유 호흡</Text>에 연결되어 있어 여기서 삭제할 수 없습니다.
+                  {'\n'}공유 호흡 화면에서만 삭제할 수 있어요.
                 </Text>
               </View>
-
-              <Switch
-                value={confirmLock}
-                onValueChange={(v) => applyConfirmLock(v)}
-                trackColor={{ false: '#273445', true: 'rgba(76,201,255,0.35)' }}
-                thumbColor={confirmLock ? FOCUS : '#8FA3B8'}
-                ios_backgroundColor="#273445"
-              />
-            </View>
+            )}
           </View>
 
           {/* 상단 2카드 */}
           <View style={{ flexDirection: 'row', gap: 10, marginBottom: 12 }}>
+            {/* 왼쪽: 통계 */}
             <View
               style={{
                 flex: 1,
@@ -373,46 +520,45 @@ export default function RoutineDetailScreen() {
                 padding: 14,
               }}
             >
-              <Text style={{ color: MUTED, fontSize: 12 }}>최근 {days}일 · 밸런스</Text>
+              <Text style={{ color: MUTED, fontSize: 12 }}>최근 {days}일 · 통계</Text>
 
-              <Text style={{ color: TEXT, fontSize: 14, fontWeight: '900', marginTop: 8 }}>
-                {guidance.title}
-              </Text>
+              <Text style={{ color: TEXT, fontSize: 14, fontWeight: '900', marginTop: 8 }}>{guidance.title}</Text>
+              <Text style={{ color: MUTED, fontSize: 12, marginTop: 6, lineHeight: 18 }}>{guidance.body}</Text>
 
-              <Text style={{ color: MUTED, fontSize: 12, marginTop: 6, lineHeight: 18 }}>
-                {guidance.body}
-              </Text>
-
+              {/* 비율바 */}
               <View
                 style={{
                   marginTop: 12,
-                  height: 10,
+                  height: 12,
                   borderRadius: 999,
                   backgroundColor: BG,
                   borderWidth: 1,
                   borderColor: LINE,
                   overflow: 'hidden',
+                  flexDirection: 'row',
                 }}
               >
-                <View
-                  style={{
-                    width: `${stats.focusPct}%`,
-                    height: '100%',
-                    backgroundColor: rgbaFromRgb(ratioColor, 0.85),
-                  }}
-                />
+                <View style={{ flex: bar.f, backgroundColor: FOCUS }} />
+                <View style={{ flex: bar.u, backgroundColor: UNCHECK }} />
+                <View style={{ flex: bar.r, backgroundColor: REST }} />
               </View>
 
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 10 }}>
-                <Text style={{ color: FOCUS, fontWeight: '900' }}>완료 {stats.done}</Text>
-                <Text style={{ color: REST, fontWeight: '900' }}>휴식 {stats.rest}</Text>
-              </View>
+              <Text style={{ marginTop: 10, fontSize: 10, fontWeight: '900' }} numberOfLines={1}>
+                <Text style={{ color: FOCUS }}>
+                  완료 ({stats.done}) {stats.focusPct}%
+                </Text>
+                <Text style={{ color: MUTED }}>  ↔  </Text>
+                <Text style={{ color: REST }}>
+                  {stats.restPct}% ({stats.rest}) 휴식
+                </Text>
+              </Text>
 
               <Text style={{ color: MUTED, fontSize: 11, marginTop: 6 }}>
-                모름 {stats.unknown} · 전체 {stats.total}
+                미체크 {stats.uncheck} · {stats.uncheckPct}% · 전체 {stats.total}
               </Text>
             </View>
 
+            {/* 오른쪽: 오늘 기록 + 7일 리듬 */}
             <View
               style={{
                 flex: 1,
@@ -422,6 +568,7 @@ export default function RoutineDetailScreen() {
                 borderColor: guideBorder,
                 padding: 14,
                 overflow: 'hidden',
+                minHeight: 150,
               }}
             >
               <View
@@ -437,38 +584,94 @@ export default function RoutineDetailScreen() {
                 }}
               />
 
-              <Text style={{ color: MUTED, fontSize: 12 }}>요약</Text>
+              <View style={{ flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between' }}>
+                <Text style={{ color: MUTED, fontSize: 12 }}>오늘</Text>
+                <Text style={{ color: MUTED, fontSize: 11 }}>{todayKey}</Text>
+              </View>
 
-              <Text style={{ color: TEXT, fontSize: 16, fontWeight: '900', marginTop: 6 }}>
-                기록 {stats.total}
-              </Text>
-
-              <Text style={{ color: MUTED, fontSize: 12, marginTop: 8, lineHeight: 18 }}>
-                {confirmLock ? '확인 잠금이 켜져 있어 최근 3일만 확인할 수 있습니다.' : '완료/휴식/모름은 모두 “관찰”로 기록됩니다.'}
-              </Text>
-
-              <View
-                style={{
-                  marginTop: 10,
-                  paddingVertical: 8,
-                  paddingHorizontal: 10,
-                  borderRadius: 12,
-                  borderWidth: 1,
-                  borderColor: LINE,
-                  backgroundColor: '#0F1620',
-                }}
-              >
-                <Text style={{ color: TEXT, fontSize: 12, fontWeight: '900' }}>
-                  {confirmLock ? '권장: 지금은 과거 확인을 멈춥니다.' : '권장: 확정이 필요 없으면 “모름”으로 둬도 됩니다.'}
+              <View style={{ marginTop: 8 }}>
+                <Text style={{ color: TEXT, fontSize: 14, fontWeight: '900' }} numberOfLines={1}>
+                  {todayStatus === 'done'
+                    ? '오늘은 완료로 기록됨'
+                    : todayStatus === 'rest'
+                    ? '오늘은 휴식으로 기록됨'
+                    : '아직 기록 없음'}
                 </Text>
                 <Text style={{ color: MUTED, fontSize: 11, marginTop: 4, lineHeight: 16 }}>
-                  {confirmLock ? '확인은 불안을 잠깐만 낮추고, 다음 불안을 키울 수 있습니다.' : '정답을 찾지 않는 연습이 강박을 약하게 만듭니다.'}
+                  탭 한 번으로 기록합니다. 부담 없이 남겨도 됩니다.
+                </Text>
+              </View>
+
+              <View style={{ flexDirection: 'row', gap: 8, marginTop: 12 }}>
+                <Pressable
+                  onPress={() => saveToday('done')}
+                  disabled={savingToday}
+                  style={{
+                    flex: 1,
+                    paddingVertical: 10,
+                    borderRadius: 14,
+                    borderWidth: 1,
+                    borderColor: todayStatus === 'done' ? 'rgba(76,201,255,0.65)' : LINE,
+                    backgroundColor: todayStatus === 'done' ? 'rgba(76,201,255,0.18)' : '#0F1620',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    opacity: savingToday ? 0.7 : 1,
+                  }}
+                >
+                  <Text style={{ color: FOCUS, fontWeight: '900' }}>완료</Text>
+                </Pressable>
+
+                <Pressable
+                  onPress={() => saveToday('rest')}
+                  disabled={savingToday}
+                  style={{
+                    flex: 1,
+                    paddingVertical: 10,
+                    borderRadius: 14,
+                    borderWidth: 1,
+                    borderColor: todayStatus === 'rest' ? 'rgba(59,231,176,0.60)' : LINE,
+                    backgroundColor: todayStatus === 'rest' ? 'rgba(59,231,176,0.14)' : '#0F1620',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    opacity: savingToday ? 0.7 : 1,
+                  }}
+                >
+                  <Text style={{ color: REST, fontWeight: '900' }}>휴식</Text>
+                </Pressable>
+              </View>
+
+              <View style={{ marginTop: 12 }}>
+                <Text style={{ color: MUTED, fontSize: 11, fontWeight: '900' }}>최근 7일 리듬</Text>
+
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 8 }}>
+                  {dayList7.map((d) => {
+                    const st = statusByDate.get(d);
+                    const bg = st === 'done' ? FOCUS : st === 'rest' ? REST : UNCHECK;
+                    return (
+                      <View key={d} style={{ alignItems: 'center', width: 14 }}>
+                        <View
+                          style={{
+                            width: 10,
+                            height: 10,
+                            borderRadius: 3,
+                            backgroundColor: bg,
+                            borderWidth: 1,
+                            borderColor: LINE,
+                          }}
+                        />
+                      </View>
+                    );
+                  })}
+                </View>
+
+                <Text style={{ color: MUTED, fontSize: 10, marginTop: 6 }}>
+                  미체크는 공백이 아니라 “유지”로 둡니다.
                 </Text>
               </View>
             </View>
           </View>
 
-          {/* 큰 잔디 */}
+          {/* 현황 */}
           <View
             style={{
               backgroundColor: CARD,
@@ -489,20 +692,9 @@ export default function RoutineDetailScreen() {
                 {heatGrid.map((col, w) => (
                   <View key={w} style={{ gap: 6 }}>
                     {col.map((cell, r) => {
-                      const bg =
-                        cell.status === 'done'
-                          ? FOCUS
-                          : cell.status === 'rest'
-                            ? REST
-                            : cell.status === 'unknown'
-                              ? UNKNOWN
-                              : '#1A2330';
-
-                      // ✅ 블록 탭 반응 없음 + confirmLock 시 인터랙션 차단(확인 행동 줄이기)
-                      const disabled = confirmLock;
-
+                      const bg = cell.status === 'done' ? FOCUS : cell.status === 'rest' ? REST : UNCHECK;
                       return (
-                        <Pressable key={`${w}-${r}`} disabled={disabled} onPress={() => {}}>
+                        <Pressable key={`${w}-${r}`} disabled onPress={() => {}}>
                           <View
                             style={{
                               width: 12,
@@ -511,7 +703,7 @@ export default function RoutineDetailScreen() {
                               backgroundColor: bg,
                               borderWidth: 1,
                               borderColor: LINE,
-                              opacity: disabled ? 0.92 : 1,
+                              opacity: 0.95,
                             }}
                           />
                         </Pressable>
@@ -522,28 +714,15 @@ export default function RoutineDetailScreen() {
               </View>
             </View>
 
-            <View
-              style={{
-                flexDirection: 'row',
-                justifyContent: 'flex-end',
-                gap: 10,
-                marginTop: 12,
-                alignItems: 'center',
-              }}
-            >
+            <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: 10, marginTop: 12, alignItems: 'center' }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                <View style={{ width: 12, height: 12, borderRadius: 3, backgroundColor: UNCHECK, borderWidth: 1, borderColor: LINE }} />
+                <Text style={{ color: MUTED, fontSize: 12, fontWeight: '900' }}>미체크</Text>
+              </View>
+
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                 <View style={{ width: 12, height: 12, borderRadius: 3, backgroundColor: REST, borderWidth: 1, borderColor: LINE }} />
                 <Text style={{ color: MUTED, fontSize: 12, fontWeight: '900' }}>휴식</Text>
-              </View>
-
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                <View style={{ width: 12, height: 12, borderRadius: 3, backgroundColor: UNKNOWN, borderWidth: 1, borderColor: LINE }} />
-                <Text style={{ color: MUTED, fontSize: 12, fontWeight: '900' }}>모름</Text>
-              </View>
-
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                <View style={{ width: 12, height: 12, borderRadius: 3, backgroundColor: '#1A2330', borderWidth: 1, borderColor: LINE }} />
-                <Text style={{ color: MUTED, fontSize: 12, fontWeight: '900' }}>미체크</Text>
               </View>
 
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
@@ -552,31 +731,23 @@ export default function RoutineDetailScreen() {
               </View>
             </View>
 
-            {confirmLock ? (
-              <View style={{ marginTop: 12, padding: 10, borderRadius: 12, borderWidth: 1, borderColor: LINE, backgroundColor: '#0F1620' }}>
-                <Text style={{ color: MUTED, fontSize: 12, lineHeight: 18 }}>
-                  확인 잠금이 켜져 있습니다. 과거를 확인하고 싶어질수록, 지금은 그 행동을 줄이는 연습이 됩니다.
-                </Text>
+            <View style={{ marginTop: 14, alignItems: 'center' }}>
+              <View style={{ flexDirection: 'row', justifyContent: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <TrendBadge label="완료(7d)" diffPct={diffFocus} accent={FOCUS} />
+                <TrendBadge label="휴식(7d)" diffPct={diffRest} accent={REST} />
               </View>
-            ) : null}
+
+              <Text style={{ color: MUTED, fontSize: 10, marginTop: 8, textAlign: 'center' }}>
+                최근 7일 비율이 최근 84일 평균 대비 얼마나 달라졌는지 표시합니다.
+              </Text>
+            </View>
           </View>
 
           {/* 월 캘린더 */}
           <View style={{ backgroundColor: CARD, borderRadius: 18, borderWidth: 1, borderColor: LINE, padding: 10, marginBottom: 12 }}>
             <Calendar
               markedDates={markedDates}
-              markingType="simple"
-              // ✅ 눌러도 날짜 표시 카드 없음
-              // ✅ confirmLock ON이면 최근 3일 외 날짜 확인 차단
-              onDayPress={(day) => {
-                if (!confirmLock) return;
-                const k = day.dateString;
-                if (k < lockRange.min || k > lockRange.max) return;
-              }}
-              minDate={confirmLock ? lockRange.min : undefined}
-              maxDate={confirmLock ? lockRange.max : undefined}
-              hideArrows={confirmLock}
-              disableAllTouchEventsForDisabledDays={confirmLock}
+              onDayPress={() => {}}
               theme={{
                 backgroundColor: CARD,
                 calendarBackground: CARD,
@@ -589,8 +760,6 @@ export default function RoutineDetailScreen() {
               }}
             />
           </View>
-
-          {/* ✅ 응원 섹션 삭제 완료 */}
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
